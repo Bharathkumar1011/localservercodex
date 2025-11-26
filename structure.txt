@@ -1,0 +1,38 @@
+
+C:\work invest\server local test
+├── .env
+├── .git
+├── .gitignore
+├── .vscode
+├── activityLogService.ts
+├── controllers
+├── CONVERSION_SUMMARY.md
+├── db.ts
+├── dist
+├── drizzle.config.ts
+├── emailService.ts
+├── index.ts
+├── middleware
+├── migrations
+├── node_modules
+├── package-lock.json
+├── package.json
+├── prisma
+├── prisma.config.ts
+├── replitAuth.ts
+├── routes
+├── routes.ts
+├── services
+├── shared
+├── smtpEmailService.ts
+├── stageProgressionService.ts
+├── storage.ts
+├── structure.txt
+├── tsconfig.json
+└── vite.ts
+
+directory: 11 file: 19
+
+
+
+[2K[1G
