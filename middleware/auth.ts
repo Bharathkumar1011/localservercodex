@@ -5,13 +5,13 @@ import { storage } from '../storage.js';
 export const requireRole = (roles: string[]) => {
   return async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const userId = (req as any).user?.claims?.sub;
+      const userId = (req as any).verifiedUser?.id || (req as any).user?.claims?.sub;
       if (!userId) {
         return res.status(401).json({ message: 'User ID not found' });
       }
       
       // Verify role from storage, don't trust JWT claims
-      const user = await storage.getUser(userId);
+      const user = (req as any).verifiedUser || await storage.getUser(userId);
       if (!user) {
         return res.status(401).json({ message: 'User not found' });
       }

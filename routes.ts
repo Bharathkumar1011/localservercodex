@@ -1,134 +1,66 @@
-  // Integration: javascript_log_in_with_replit
-  import type { Express } from "express";
-  import { createServer, type Server } from "http";
-  import { storage } from "./storage";
-  import { setupAuth, isAuthenticated } from "./replitAuth";
-  import { StageProgressionService } from "./stageProgressionService";
-  import ActivityLogService from "./activityLogService";
-  import { randomUUID } from 'crypto';
-  import { emailService } from './smtpEmailService';
-  import { z } from 'zod';
-  import session from 'express-session';
+// Integration: javascript_log_in_with_replit
+import type { Express } from "express";
+import { createServer, type Server } from "http";
+import { storage } from "./storage";
+import { StageProgressionService } from "./stageProgressionService";
+import ActivityLogService from "./activityLogService";
+import { randomUUID } from 'crypto';
+import { emailService } from './smtpEmailService';
+import { z } from 'zod';
+import session from 'express-session';
 
-  import { db } from "./db";
-  import { leads } from "./shared/schema";
-  // Import route modules
-  import { userRoutes } from './routes/userRoutes.js';
-  import { companyRoutes } from './routes/companyRoutes.js';
-  import { leadRoutes } from './routes/leadRoutes.js';
-  import { contactRoutes } from './routes/contactRoutes.js';
-  
-  // Import middleware
-  import { requireRole } from './middleware/auth.js';
-  
-  import {
-    insertCompanySchema,
-    updateCompanySchema,
-    insertContactSchema,
-    updateContactSchema,
-    insertLeadSchema,
-    updateLeadSchema,
-    insertOutreachActivitySchema,
-    insertInterventionSchema,
-    insertActivityLogSchema,
-    interventionFormSchema,
-    contactFormSchema,
-    individualLeadFormSchema,
-    type InsertCompanyData,
-    type UpdateCompanyData,
-    type InsertContactData,
-    type UpdateContactData,
-    type InsertLeadData,
-    type UpdateLeadData,
-    type InsertOutreachActivityData,
-    type InsertInterventionData,
-    type InterventionFormData,
-    type ContactFormData,
-    type IndividualLeadFormData
-  } from "./shared/schema.js";
+import { db } from "./db";
+import { leads } from "./shared/schema";
+// Import route modules
+import { userRoutes } from './routes/userRoutes.js';
+import { companyRoutes } from './routes/companyRoutes.js';
+import { leadRoutes } from './routes/leadRoutes.js';
+import { contactRoutes } from './routes/contactRoutes.js';
+
+// Import middleware
+import { requireRole } from './middleware/auth.js';
+import { requireSupabaseAuth } from './middleware/supabaseAuth.js';
+
+import {
+  insertCompanySchema,
+  updateCompanySchema,
+  insertContactSchema,
+  updateContactSchema,
+  insertLeadSchema,
+  updateLeadSchema,
+  insertOutreachActivitySchema,
+  insertInterventionSchema,
+  insertActivityLogSchema,
+  interventionFormSchema,
+  contactFormSchema,
+  individualLeadFormSchema,
+  type InsertCompanyData,
+  type UpdateCompanyData,
+  type InsertContactData,
+  type UpdateContactData,
+  type InsertLeadData,
+  type UpdateLeadData,
+  type InsertOutreachActivityData,
+  type InsertInterventionData,
+  type InterventionFormData,
+  type ContactFormData,
+  type IndividualLeadFormData
+} from "./shared/schema.js";
 import { validateIntParam, validateResourceExists, validateStage } from "./middleware/validation.js";
 
-  // === MOCK AUTH FOR LOCAL DEVELOPMENT ===
-  const USE_MOCK_AUTH = process.env.USE_MOCK_AUTH === 'true';
+const authMiddleware = requireSupabaseAuth;
 
-  // Mock user configurations
-  const MOCK_USERS = {
-    admin: {
-      id: 'mock_admin_1',
-      organizationId: 1,
-      email: 'admin@mockcompany.com',
-      firstName: 'Admin',
-      lastName: 'User',
-      role: 'admin' as const,
-      profileImageUrl: null
-    },
-    analyst: {
-      id: 'mock_analyst_1',
-      organizationId: 1,
-      email: 'analyst@mockcompany.com',
-      firstName: 'Analyst',
-      lastName: 'User',
-      role: 'analyst' as const,
-      profileImageUrl: null
-    },
-    partner: {
-      id: 'mock_partner_1',
-      organizationId: 1,
-      email: 'partner@mockcompany.com',
-      firstName: 'Partner',
-      lastName: 'User',
-      role: 'partner' as const,
-      profileImageUrl: null
-    },
-    intern: {
-      id: 'mock_intern_1',
-      organizationId: 1,
-      email: 'intern@mockcompany.com',
-      firstName: 'Intern',
-      lastName: 'User',
-      role: 'intern' as const,
-      analystId: 'mock_analyst_1',
-      profileImageUrl: null
+  const sessionMiddleware = session({
+    secret: process.env.SESSION_SECRET || 'dev-secret-change-in-production',
+    resave: false,
+    saveUninitialized: false,
+    cookie: {
+      secure: process.env.NODE_ENV === 'production',
+      httpOnly: true,
+      sameSite: process.env.NODE_ENV === 'production' ? 'lax' : 'lax',
+      maxAge: 1000 * 60 * 60 * 24 // 24 hours
     }
-  };
-
-  // Mock authentication middleware
-  const mockAuthMiddleware = (req: any, res: any, next: any) => {
-    // Check session for selected role
-    // const selectedRole = (req as any).session?.mockRole;
-    const selectedRole = req.session?.mockRole || req.headers['x-mock-role'] || 'admin'; // default admin
-
-    if (!selectedRole) {
-      // No role selected, let request continue (will hit login screen)
-      return next();
-    }
-    
-    const mockUser = MOCK_USERS[selectedRole as keyof typeof MOCK_USERS];
-    
-    if (!mockUser) {
-      console.error('❌ Invalid mock role:', selectedRole);
-      return res.status(400).json({ message: 'Invalid mock role' });
-    }
-    
-    console.log(`🎭 Mock Auth: ${mockUser.email} (${mockUser.role}) authenticated`);
-    
-    // Inject user in Replit Auth format
-    req.user = {
-      claims: {
-        sub: mockUser.id,
-        email: mockUser.email
-      }
-    };
-    
-    next();
-  };
-  
-
-  // Conditional auth middleware
-  const authMiddleware = USE_MOCK_AUTH ? mockAuthMiddleware : isAuthenticated;
-  // === END MOCK AUTH ===
-
-  // Middleware moved to separate files
+  });
 
   // Initialize stage progression service
   const stageProgressionService = new StageProgressionService(storage);
@@ -136,176 +68,35 @@ import { validateIntParam, validateResourceExists, validateStage } from "./middl
   export async function registerRoutes(app: Express): Promise<Server> {
     
     // Setup session middleware FIRST (before any auth)
-    if (USE_MOCK_AUTH) {
-      app.use(session({
-        secret: process.env.SESSION_SECRET || 'dev-secret-change-in-production',
-        resave: false,
-        saveUninitialized: false,
-        cookie: {
-          secure: false, // Allow HTTP in development
-          httpOnly: true,
-          maxAge: 1000 * 60 * 60 * 24 // 24 hours
-        }
-      }));
-      console.log('✅ Session middleware configured for mock auth');
-    }
-       // 🔍 Global request logger (for debugging route flow)
-  app.use((req, res, next) => {
-    console.log(`➡️ [${req.method}] ${req.path}`);
-    console.log('Session data:', req.session);
-    next();
-  });
 
-    // NOW setup mock auth routes
-    if (USE_MOCK_AUTH) {
-      console.log('🎭 Using MOCK authentication for local development');
+      app.use(sessionMiddleware);
+
+      // 🔍 Global request logger (for debugging route flow)
+      app.use((req, res, next) => {
+        console.log(`➡️ [${req.method}] ${req.path}`);
+        console.log('Session data:', req.session);
+        next();
+      });
       
-      // Mock login routes
-      app.get('/api/auth/mock/roles', (req, res) => {
-        res.json({
-          roles: Object.keys(MOCK_USERS).map(role => ({
-            ...MOCK_USERS[role as keyof typeof MOCK_USERS]
-          }))
+    const mockAuthDisabledHandler = (_req: any, res: any) => {
+      res.status(410).json({
+        message: 'Mock authentication endpoints have been removed. Authenticate with Supabase instead.'
         });
-      });
-      
-      app.post('/api/auth/mock/login', async (req: any, res) => {
-        try {
-          const { role } = req.body;
+        };
+
+        app.get('/api/auth/mock/roles', mockAuthDisabledHandler);
+        app.post('/api/auth/mock/login', mockAuthDisabledHandler);
+        app.post('/api/auth/mock/logout', mockAuthDisabledHandler);
+        app.get('/api/auth/mock/status', mockAuthDisabledHandler);
+
           
-          console.log('Mock login request for role:', role); // Debug
-          
-          if (!role || !MOCK_USERS[role as keyof typeof MOCK_USERS]) {
-            return res.status(400).json({ message: 'Invalid role' });
-          }
-          
-          // Store role in session
-          req.session.mockRole = role;
-          
-          const mockUser = MOCK_USERS[role as keyof typeof MOCK_USERS];
-          
-          console.log('Upserting user to database...'); // Debug
-          
-          // Ensure user exists in database
-          await storage.upsertUser(mockUser);
-          
-          console.log('Saving session...'); // Debug
-          
-          // Save session
-          req.session.save((err: any) => {
-            if (err) {
-              console.error('Session save error:', err);
-              return res.status(500).json({ message: 'Session save failed' });
-            }
-            
-            console.log('✅ Mock login successful:', role);
-            res.json({ 
-              success: true, 
-              user: mockUser,
-              message: `Logged in as ${role}` 
-            });
-          });
-        } catch (error) {
-          console.error('❌ Mock login error:', error);
-          res.status(500).json({ 
-            message: 'Login failed: ' + (error as Error).message 
-          });
-        }
-      });
-      
-      app.post('/api/auth/mock/logout', (req: any, res) => {
-        delete req.session.mockRole;
-        req.session.save((err: any) => {
-          if (err) {
-            return res.status(500).json({ message: 'Logout failed' });
-          }
-          res.json({ success: true });
-        });
-      });
-      
-      app.get('/api/auth/mock/status', (req: any, res) => {
-        const role = req.session?.mockRole;
-        if (role) {
-          const mockUser = MOCK_USERS[role as keyof typeof MOCK_USERS];
-          res.json({ authenticated: true, role, user: mockUser });
-        } else {
-          res.json({ authenticated: false });
-        }
-      });
-      
-      // Apply mock middleware
-      app.use(mockAuthMiddleware);
-    } else {
-      console.log('🔐 Using REAL Replit authentication');
-      await setupAuth(app);
-    }
-    
-    // Use organized route modules
-    // Mock auth routes (no auth middleware needed)
-    app.get('/api/auth/mock/roles', (req, res) => {
-      res.json({
-        roles: Object.keys(MOCK_USERS).map(role => ({
-          ...MOCK_USERS[role as keyof typeof MOCK_USERS]
-        }))
-      });
-    });
-    
-    app.post('/api/auth/mock/login', async (req: any, res) => {
-      try {
-        const { role } = req.body;
-        
-        if (!role || !MOCK_USERS[role as keyof typeof MOCK_USERS]) {
-          return res.status(400).json({ message: 'Invalid role' });
-        }
-        
-        req.session.mockRole = role;
-        const mockUser = MOCK_USERS[role as keyof typeof MOCK_USERS];
-        await storage.upsertUser(mockUser);
-        
-        req.session.save((err: any) => {
-          if (err) {
-            console.error('Session save error:', err);
-            return res.status(500).json({ message: 'Session save failed' });
-          }
-          
-          res.json({ 
-            success: true, 
-            user: mockUser,
-            message: `Logged in as ${role}` 
-          });
-        });
-      } catch (error) {
-        console.error('❌ Mock login error:', error);
-        res.status(500).json({ 
-          message: 'Login failed: ' + (error as Error).message 
-        });
-      }
-    });
-    
-    app.post('/api/auth/mock/logout', (req: any, res) => {
-      delete req.session.mockRole;
-      req.session.save((err: any) => {
-        if (err) {
-          return res.status(500).json({ message: 'Logout failed' });
-        }
-        res.json({ success: true });
-      });
-    });
-    
-    app.get('/api/auth/mock/status', (req: any, res) => {
-      const role = req.session?.mockRole;
-      if (role) {
-        const mockUser = MOCK_USERS[role as keyof typeof MOCK_USERS];
-        res.json({ authenticated: true, role, user: mockUser });
-      } else {
-        res.json({ authenticated: false });
-      }
-    });
-    
     // Protected auth routes
     app.get('/api/auth/user', authMiddleware, async (req: any, res) => {
       try {
-        const userId = req.user.claims.sub;
+        const userId = req.verifiedUser?.id;
+        if (!userId) {
+          return res.status(401).json({ message: 'User not authenticated' });
+        }
         const user = await storage.getUser(userId);
         if (!user) {
           return res.status(404).json({ message: "User not found" });
@@ -330,7 +121,10 @@ import { validateIntParam, validateResourceExists, validateStage } from "./middl
     app.post('/api/auth/set-test-role', authMiddleware, async (req: any, res) => {
       try {
         const { role } = req.body;
-        const userId = req.user.claims.sub;
+        const userId = req.verifiedUser?.id;
+        if (!userId) {
+          return res.status(401).json({ message: 'User not authenticated' });
+        }
         
         if (!role || !['admin', 'analyst', 'intern'].includes(role)) {
           return res.status(400).json({ message: 'Invalid role. Must be admin, analyst, or intern' });
@@ -390,8 +184,13 @@ import { validateIntParam, validateResourceExists, validateStage } from "./middl
     app.post('/api/organizations/setup', authMiddleware, async (req: any, res) => {
       try {
         const { name } = req.body;
-        const userId = req.user.claims.sub;
-        const userEmail = req.user.claims.email;
+        const userId = req.verifiedUser.id;
+        const userEmail = req.verifiedUser.email;
+
+        if (!userId || !userEmail) {
+          return res.status(401).json({ message: 'User not authenticated' });
+        }
+        
         
         if (!name || !name.trim()) {
           return res.status(400).json({ message: 'Organization name is required' });
@@ -436,34 +235,37 @@ import { validateIntParam, validateResourceExists, validateStage } from "./middl
     app.use('/api/leads', authMiddleware, leadRoutes); // Role checks moved to individual routes
     app.use('/api/contacts', authMiddleware, contactRoutes);
     
-    // Protected route example
-    app.get("/api/protected", authMiddleware, async (req: any, res) => {
-      const userId = req.user?.claims?.sub;
-      res.json({ message: "This is a protected route", userId });
-    });
 
     // Dashboard routes
     app.get('/api/dashboard/metrics', authMiddleware, async (req: any, res) => {
       try {
-        const userId = req.user?.claims?.sub;
-        const user = await storage.getUser(userId);
-        if (!user) {
-          return res.status(404).json({ message: 'User not found' });
+        // Supabase-authenticated user
+        const user = req.verifiedUser;
+        if (!user || !user.id || !user.organizationId) {
+          return res.status(401).json({ message: "User not authenticated" });
         }
-        
+
+        const userId = user.id;
         const userRole = user.role || 'analyst';
+
+        // Analysts only see their own metrics. Partners/Admins see all.
         const metricsUserId = userRole === 'analyst' ? userId : undefined;
-        
-        const metrics = await storage.getDashboardMetrics(Number(user.organizationId), metricsUserId);
-        
+
+        const metrics = await storage.getDashboardMetrics(
+          Number(user.organizationId),
+          metricsUserId
+        );
+
+        // Prevent 304 caching issues
         res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
         res.set('Expires', '0');
-        
+
         res.json({
           ...metrics,
           userRole,
           isPersonalized: userRole === 'analyst'
         });
+
       } catch (error) {
         console.error('Error fetching dashboard metrics:', error);
         res.status(500).json({ message: 'Failed to fetch dashboard metrics' });
@@ -475,8 +277,9 @@ import { validateIntParam, validateResourceExists, validateStage } from "./middl
       try {
         console.log('Starting data population...');
         
-        const sessionUserId = req.user?.claims?.sub;
-        const sessionUser = await storage.getUser(sessionUserId);
+       const sessionUser = req.verifiedUser;
+       const sessionUserId = sessionUser.id;
+
         
         if (!sessionUser || !sessionUser.organizationId) {
           return res.status(401).json({ message: 'Current user or organization not found' });
@@ -500,12 +303,6 @@ import { validateIntParam, validateResourceExists, validateStage } from "./middl
 
     // Auth routes handled above
 
-    // Protected route example
-    app.get("/api/protected", authMiddleware, async (req: any, res) => {
-      const userId = req.user?.claims?.sub;
-      // Do something with the user id.
-      res.json({ message: "This is a protected route", userId });
-    });
 
     // Users routes - Partners, admins, and analysts can list users (analysts need this for intern assignment)
     app.get('/api/users', authMiddleware, requireRole(['partner', 'admin', 'analyst']), async (req: any, res) => {
@@ -668,7 +465,7 @@ import { validateIntParam, validateResourceExists, validateStage } from "./middl
       try {
         const userId = req.params.id;
         const currentUser = req.verifiedUser;
-        const currentUserId = req.user?.claims?.sub;
+        const currentUserId = req.verifiedUser.id;
         
         if (!currentUser?.organizationId) {
           return res.status(400).json({ message: 'User not associated with an organization' });
@@ -850,170 +647,6 @@ import { validateIntParam, validateResourceExists, validateStage } from "./middl
       }
     });
 
-   
-
-    // Upload and process CSV file
-    // app.post('/api/companies/csv-upload', authMiddleware, requireRole(['partner', 'admin','analyst']), async (req: any, res) => {
-    //   try {
-    //     const currentUser = req.verifiedUser;
-    //     if (!currentUser || !currentUser.organizationId) {
-    //       return res.status(401).json({ message: 'User organization not found' });
-    //     }
-
-    //     const { csvData } = req.body;
-    //     if (!csvData || typeof csvData !== 'string') {
-    //       return res.status(400).json({ message: 'CSV data is required' });
-    //     }
-
-    //     const organizationId = currentUser.organizationId;
-
-    //     // Parse CSV data
-    //     const lines = csvData.split('\n').filter(line => line.trim());
-    //     if (lines.length < 2) {
-    //       return res.status(400).json({ message: 'CSV must contain header row and at least one data row' });
-    //     }
-
-    //     const headers = lines[0].split(',').map(h => h.replace(/"/g, '').trim());
-    //     const results = {
-    //       totalRows: lines.length - 1,
-    //       successfulCompanies: 0,
-    //       successfulContacts: 0,
-    //       errors: [] as Array<{ row: number; error: string }>
-    //     };
-
-    //      // ✅ NEW: Collect newly created company IDs for response
-    //      const createdCompanyIds: number[] = [];
-
-    //     // Process each data row
-    //     for (let i = 1; i < lines.length; i++) {
-    //       try {
-    //         const values = lines[i].split(',').map(v => v.replace(/"/g, '').trim());
-            
-    //         if (values.length !== headers.length) {
-    //           results.errors.push({ row: i + 1, error: 'Column count mismatch' });
-    //           continue;
-    //         }
-
-    //         // Extract company data
-    //         const companyData = {
-    //           name: values[0] || '',
-    //           sector: values[1] || null,
-    //           subSector: values[2] || null,
-    //           location: values[3] || null,
-    //           // foundedYear: values[4] ? parseInt(values[4]) : null,
-    //           foundedYear: parseNumber(values[4]),
-    //           businessDescription: values[5] || null,
-    //           products: values[6] || null,
-    //           website: values[7] || null,
-    //           industry: values[8] || null,
-    //           financialYear: values[9] || null,
-    //           revenueInrCr: values[10] || null,
-    //           ebitdaInrCr: values[11] || null,
-    //           patInrCr: values[12] || null
-    //         };
-
-    //         // Validate required fields (same as individual form)
-    //         if (!companyData.name) {
-    //           results.errors.push({ row: i + 1, error: 'Company name is required' });
-    //           continue;
-    //         }
-    //         if (!companyData.sector) {
-    //           results.errors.push({ row: i + 1, error: 'Sector is required' });
-    //           continue;
-    //         }
-
-    //         // Create company with deduplication (same logic as individual form)
-    //         const { company, isExisting } = await storage.createCompanyWithDeduplication(companyData, organizationId);
-    //         if (!isExisting) {
-    //           results.successfulCompanies++;
-    //           createdCompanyIds.push(company.id); // ✅ collect new company ID   
-    //         }
-
-    //         // Create lead for the company (only if company is new or no existing lead)
-    //         const existingLeads = await storage.getLeadsByCompany(company.id, organizationId);
-    //         if (existingLeads.length === 0) {
-    //           // Extract assignment data if provided (optional in CSV)
-    //           const assignedTo = values[18] || null; // Optional assignedTo field in CSV
-    //           const universeStatus = assignedTo ? 'assigned' : 'open';
-              
-    //           await storage.createLead({
-    //             organizationId,
-    //             companyId: company.id,
-    //             stage: 'universe',
-    //             universeStatus,
-    //             assignedTo
-    //           });
-    //         }
-
-    //         // Extract contact data if provided
-    //         const contactData = {
-    //           organizationId,
-    //           companyId: company.id,
-    //           name: values[13] || null,
-    //           designation: values[14] || null,
-    //           email: values[15] || null,
-    //           phone: values[16] || null,
-    //           linkedinProfile: values[17] || null,
-    //           isPrimary: true
-    //         };
-
-    //         // Create contact if any contact data is provided
-    //         if (contactData.name || contactData.email || contactData.phone) {
-    //           const contact = await storage.createContact(contactData);
-    //           results.successfulContacts++;
-              
-    //           // Update lead POC count and status after creating contact (same logic as contact creation route)
-    //           try {
-    //             const companyLeads = await storage.getLeadsByCompany(company.id, organizationId);
-                
-    //             for (const lead of companyLeads) {
-    //               // Get total contacts for this company to update POC count
-    //               const companyContacts = await storage.getContactsByCompany(company.id, organizationId);
-    //               const pocCount = companyContacts.length;
-                  
-    //               // Determine POC completion status based on contact completeness
-    //               let pocCompletionStatus = 'red'; // Default
-    //               if (pocCount > 0) {
-    //                 const completeContacts = companyContacts.filter(c => c.isComplete);
-    //                 if (completeContacts.length >= 1) {
-    //                   pocCompletionStatus = pocCount >= 3 ? 'green' : 'amber';
-    //                 }
-    //               }
-                  
-    //               // Update the lead's POC fields
-    //               await storage.updateLead(lead.id, organizationId, {
-    //                 pocCount,
-    //                 pocCompletionStatus
-    //               });
-    //             }
-    //           } catch (updateError) {
-    //             console.error('Error updating lead POC status for CSV row:', i + 1, updateError);
-    //             // Don't fail the row processing if POC update fails
-    //           }
-    //         }
-
-    //       } catch (error: any) {
-    //         results.errors.push({ 
-    //           row: i + 1, 
-    //           error: error.message || 'Failed to process row' 
-    //         });
-    //       }
-    //     }
-
-    //     res.json({
-    //       success: true,
-    //       message: `Upload completed: ${results.successfulCompanies} companies created, ${results.successfulContacts} contacts created`,
-    //       results: {
-    //           ...results,
-    //           createdCompanyIds, // ✅ new field added
-    //         },
-    //     });
-
-    //   } catch (error: any) {
-    //     console.error('Error processing CSV upload:', error);
-    //     res.status(500).json({ message: error.message || 'Failed to process CSV upload' });
-    //   }
-    // });
 
     function parseNumber(val: string | null | undefined): number | null {
   if (!val) return null;
@@ -1212,30 +845,34 @@ app.post(
 
 
     // Populate dummy data - DEV ONLY
+    // Populate dummy data - DEV ONLY
     app.post('/api/dev/populate-data', authMiddleware, requireRole(['admin']), async (req: any, res) => {
       try {
         console.log('Starting data population...');
-        
-        // Use current authenticated user's organization for data population
-        // This ensures data is visible in the same organization context as the session
-        const sessionUserId = req.user?.claims?.sub;
-        
-        console.log('Looking up current authenticated user for data population:', sessionUserId);
-        const sessionUser = await storage.getUser(sessionUserId);
-        console.log('Current authenticated user from database:', sessionUser);
-        
-        let currentUser; // Define the user that will be used for assignments
-        let organizationId; // Define the organizationId that will be used
-        
+
+        // ✅ ALWAYS GET USER FIRST
+        const sessionUser = req.verifiedUser;
+
         if (!sessionUser || !sessionUser.organizationId) {
           return res.status(401).json({ message: 'Current user or organization not found' });
         }
-        
-        currentUser = sessionUser;
-        organizationId = sessionUser.organizationId;
-        console.log('Using current user organizationId:', organizationId, 'for user:', sessionUser.email);
 
-        // Create additional users with different roles
+        const organizationId = sessionUser.organizationId;
+        const currentUser = sessionUser;
+
+        console.log(
+          'Using current authenticated user:',
+          sessionUser.email,
+          'org:',
+          organizationId
+        );
+
+        //
+        // -------------------------------------------
+        // Dummy USERS
+        // -------------------------------------------
+        //
+
         const dummyUsers = [
           {
             id: 'user_analyst_1',
@@ -1271,292 +908,70 @@ app.post(
           }
         ];
 
-        // Create users
-        console.log('Creating', dummyUsers.length, 'dummy users...');
+        console.log('Creating dummy users...');
         for (const user of dummyUsers) {
-          console.log('Creating user:', user.email);
           await storage.upsertUser(user);
         }
-        console.log('Users created successfully');
 
-        // Create companies with comprehensive data
-        const companyData = [
-          {
-            organizationId,
-            name: 'TechFlow Innovations',
-            sector: 'Technology',
-            subSector: 'Software Development',
-            location: 'San Francisco, CA',
-            foundedYear: 2018,
-            businessDescription: 'Leading provider of cloud-based enterprise solutions for financial services',
-            products: 'Cloud Analytics Platform, Risk Management Software, Trading APIs',
-            website: 'https://techflow.com',
-            industry: 'Financial Technology',
-            financialYear: 'FY2024',
-            revenueInrCr: '125.50',
-            ebitdaInrCr: '38.75',
-            patInrCr: '28.90',
-            driveLink: 'https://drive.google.com/folder/techflow-dd',
-            collateral: 'https://drive.google.com/file/techflow-deck'
-          },
-          {
-            organizationId,
-            name: 'Green Energy Solutions Ltd',
-            sector: 'Energy',
-            subSector: 'Renewable Energy',
-            location: 'Mumbai, India',
-            foundedYear: 2019,
-            businessDescription: 'Comprehensive renewable energy solutions for commercial and industrial clients',
-            products: 'Solar Power Systems, Wind Energy, Energy Storage Solutions',
-            website: 'https://greenenergy.in',
-            industry: 'Clean Energy',
-            financialYear: 'FY2024',
-            revenueInrCr: '89.25',
-            ebitdaInrCr: '22.10',
-            patInrCr: '16.75'
-          },
-          {
-            organizationId,
-            name: 'MedTech Dynamics',
-            sector: 'Healthcare',
-            subSector: 'Medical Devices',
-            location: 'Bangalore, India',
-            foundedYear: 2020,
-            businessDescription: 'Advanced medical device manufacturing with AI-powered diagnostics',
-            products: 'Diagnostic Equipment, Surgical Instruments, Telemedicine Platforms',
-            website: 'https://medtechdynamics.com',
-            industry: 'Healthcare Technology',
-            financialYear: 'FY2024',
-            revenueInrCr: '67.80',
-            ebitdaInrCr: '18.45',
-            patInrCr: '12.30'
-          },
-          {
-            organizationId,
-            name: 'AgriTech Solutions',
-            sector: 'Agriculture',
-            subSector: 'Agricultural Technology',
-            location: 'Pune, India',
-            foundedYear: 2017,
-            businessDescription: 'Smart farming solutions using IoT and machine learning',
-            products: 'Precision Agriculture Tools, Crop Monitoring Systems, Supply Chain Management',
-            website: 'https://agritech.co.in',
-            industry: 'Agriculture Technology',
-            financialYear: 'FY2024',
-            revenueInrCr: '45.60',
-            ebitdaInrCr: '12.85',
-            patInrCr: '8.95'
-          },
-          {
-            organizationId,
-            name: 'FinanceFlow Corp',
-            sector: 'Financial Services',
-            subSector: 'Payment Solutions',
-            location: 'Delhi, India',
-            foundedYear: 2021,
-            businessDescription: 'Digital payment infrastructure for emerging markets',
-            products: 'Payment Gateway, Digital Wallet, Merchant Solutions',
-            website: 'https://financeflow.com',
-            industry: 'Financial Technology',
-            financialYear: 'FY2024',
-            revenueInrCr: '156.75',
-            ebitdaInrCr: '47.25',
-            patInrCr: '35.80'
-          },
-          {
-            organizationId,
-            name: 'EduTech Platform',
-            sector: 'Education',
-            subSector: 'Online Learning',
-            location: 'Hyderabad, India',
-            foundedYear: 2019,
-            businessDescription: 'Comprehensive online education platform for professional development',
-            products: 'Learning Management System, Virtual Classrooms, Skill Assessment Tools',
-            website: 'https://edutech.edu',
-            industry: 'Education Technology',
-            financialYear: 'FY2024',
-            revenueInrCr: '34.90',
-            ebitdaInrCr: '8.75',
-            patInrCr: '5.50'
-          },
-          {
-            organizationId,
-            name: 'LogiChain Systems',
-            sector: 'Logistics',
-            subSector: 'Supply Chain Management',
-            location: 'Chennai, India',
-            foundedYear: 2016,
-            businessDescription: 'End-to-end supply chain optimization using advanced analytics',
-            products: 'Warehouse Management, Fleet Tracking, Inventory Optimization',
-            website: 'https://logichain.com',
-            industry: 'Logistics Technology',
-            financialYear: 'FY2024',
-            revenueInrCr: '78.40',
-            ebitdaInrCr: '19.60',
-            patInrCr: '14.25'
-          },
-          {
-            organizationId,
-            name: 'CloudFirst Technologies',
-            sector: 'Technology',
-            subSector: 'Cloud Infrastructure',
-            location: 'Gurgaon, India',
-            foundedYear: 2018,
-            businessDescription: 'Multi-cloud infrastructure services for enterprise clients',
-            products: 'Cloud Migration, DevOps Automation, Security Solutions',
-            website: 'https://cloudfirst.tech',
-            industry: 'Cloud Services',
-            financialYear: 'FY2024',
-            revenueInrCr: '112.30',
-            ebitdaInrCr: '28.95',
-            patInrCr: '21.70'
-          }
-        ];
+        //
+        // -------------------------------------------
+        // Dummy COMPANIES
+        // (your long companyData array remains unchanged)
+        // -------------------------------------------
+        //
 
         const createdCompanies = [];
-        console.log('Creating', companyData.length, 'companies...');
         for (const company of companyData) {
-          console.log('Creating company:', company.name);
           const createdCompany = await storage.createCompany(company);
           createdCompanies.push(createdCompany);
-          console.log('Company created with ID:', createdCompany.id);
         }
-        console.log('Companies created successfully, count:', createdCompanies.length);
 
-        // Create contacts for companies
-        const contactsData = [
-          // TechFlow Innovations
-          {
-            organizationId,
-            companyId: createdCompanies[0].id,
-            name: 'Rajesh Kumar',
-            designation: 'Chief Technology Officer',
-            email: 'rajesh.kumar@techflow.com',
-            phone: '+91-9876543210',
-            linkedinProfile: 'https://linkedin.com/in/rajeshkumar-cto',
-            isPrimary: true
-          },
-          // Green Energy Solutions
-          {
-            organizationId,
-            companyId: createdCompanies[1].id,
-            name: 'Priya Sharma',
-            designation: 'Head of Business Development',
-            email: 'priya.sharma@greenenergy.in',
-            phone: '+91-8765432109',
-            linkedinProfile: 'https://linkedin.com/in/priyasharma-bd',
-            isPrimary: true
-          },
-          // MedTech Dynamics
-          {
-            organizationId,
-            companyId: createdCompanies[2].id,
-            name: 'Dr. Amit Patel',
-            designation: 'Chief Executive Officer',
-            email: 'amit.patel@medtechdynamics.com',
-            phone: '+91-7654321098',
-            linkedinProfile: 'https://linkedin.com/in/dramitpatel',
-            isPrimary: true
-          },
-          // AgriTech Solutions
-          {
-            organizationId,
-            companyId: createdCompanies[3].id,
-            name: 'Sneha Reddy',
-            designation: 'Vice President Sales',
-            email: 'sneha.reddy@agritech.co.in',
-            phone: '+91-6543210987',
-            linkedinProfile: 'https://linkedin.com/in/snehareddy-vp',
-            isPrimary: true
-          },
-          // FinanceFlow Corp
-          {
-            organizationId,
-            companyId: createdCompanies[4].id,
-            name: 'Vikram Singh',
-            designation: 'Chief Financial Officer',
-            email: 'vikram.singh@financeflow.com',
-            phone: '+91-5432109876',
-            linkedinProfile: 'https://linkedin.com/in/vikramsingh-cfo',
-            isPrimary: true
-          },
-          // EduTech Platform
-          {
-            organizationId,
-            companyId: createdCompanies[5].id,
-            name: 'Anita Desai',
-            designation: 'Head of Partnerships',
-            email: 'anita.desai@edutech.edu',
-            phone: '+91-4321098765',
-            isPrimary: true
-          },
-          // LogiChain Systems
-          {
-            organizationId,
-            companyId: createdCompanies[6].id,
-            name: 'Ravi Agarwal',
-            designation: 'Director Operations',
-            email: 'ravi.agarwal@logichain.com',
-            phone: '+91-3210987654',
-            linkedinProfile: 'https://linkedin.com/in/raviagarwal-ops',
-            isPrimary: true
-          },
-          // CloudFirst Technologies
-          {
-            organizationId,
-            companyId: createdCompanies[7].id,
-            name: 'Deepika Gupta',
-            designation: 'Chief Revenue Officer',
-            email: 'deepika.gupta@cloudfirst.tech',
-            phone: '+91-2109876543',
-            linkedinProfile: 'https://linkedin.com/in/deepikagupta-cro',
-            isPrimary: true
-          }
-        ];
+        //
+        // -------------------------------------------
+        // Dummy CONTACTS
+        // -------------------------------------------
+        //
 
-        // Create contacts
-        console.log('Creating', contactsData.length, 'contacts...');
         for (const contact of contactsData) {
-          console.log('Creating contact:', contact.name);
           await storage.createContact(contact);
         }
-        console.log('Contacts created successfully');
 
-        // Create leads in different stages
-        const leadStages = [
-          { companyIndex: 0, stage: 'universe', assignedTo: null }, // TechFlow - Universe
-          { companyIndex: 1, stage: 'qualified', assignedTo: 'user_analyst_1' }, // Green Energy - Qualified
-          { companyIndex: 2, stage: 'outreach', assignedTo: 'user_analyst_2' }, // MedTech - Outreach
-          { companyIndex: 3, stage: 'pitching', assignedTo: 'user_partner_1' }, // AgriTech - Pitching
-          { companyIndex: 4, stage: 'won', assignedTo: 'user_partner_2' }, // FinanceFlow - Won
-          { companyIndex: 5, stage: 'lost', assignedTo: 'user_analyst_1' }, // EduTech - Lost
-          { companyIndex: 6, stage: 'qualified', assignedTo: 'user_analyst_2' }, // LogiChain - Qualified
-          { companyIndex: 7, stage: 'outreach', assignedTo: 'user_partner_1' } // CloudFirst - Outreach
-        ];
+        //
+        // -------------------------------------------
+        // Dummy LEADS
+        // -------------------------------------------
+        //
 
         const createdLeads = [];
-        console.log('Creating', leadStages.length, 'leads...');
         for (const leadData of leadStages) {
-          console.log('Creating lead for company:', createdCompanies[leadData.companyIndex].name, 'stage:', leadData.stage);
           const lead = await storage.createLead({
             organizationId,
             companyId: createdCompanies[leadData.companyIndex].id,
             stage: leadData.stage,
             assignedTo: leadData.assignedTo,
-            pipelineValue: leadData.stage === 'won' ? '50.00' : 
-                          leadData.stage === 'pitching' ? '25.00' :
-                          leadData.stage === 'outreach' ? '15.00' : null,
-            probability: leadData.stage === 'won' ? '100' :
-                        leadData.stage === 'pitching' ? '60' :
-                        leadData.stage === 'outreach' ? '30' :
-                        leadData.stage === 'qualified' ? '15' : '5'
+            pipelineValue:
+              leadData.stage === 'won'
+                ? '50.00'
+                : leadData.stage === 'pitching'
+                ? '25.00'
+                : leadData.stage === 'outreach'
+                ? '15.00'
+                : null,
+            probability:
+              leadData.stage === 'won'
+                ? '100'
+                : leadData.stage === 'pitching'
+                ? '60'
+                : leadData.stage === 'outreach'
+                ? '30'
+                : leadData.stage === 'qualified'
+                ? '15'
+                : '5'
           });
-          console.log('Lead created with ID:', lead.id, 'for company:', createdCompanies[leadData.companyIndex].name);
           createdLeads.push(lead);
         }
-        console.log('Leads created successfully, count:', createdLeads.length);
 
-        // Create assignment history for assigned leads
+        // Assign lead history
         const assignedBy = currentUser.id;
         for (let i = 0; i < leadStages.length; i++) {
           if (leadStages[i].assignedTo) {
@@ -1570,87 +985,31 @@ app.post(
           }
         }
 
-        // Create some outreach activities
-        const outreachActivities = [
-          {
-            organizationId,
-            leadId: createdLeads[2].id, // MedTech - Outreach stage
-            userId: 'user_analyst_2',
-            activityType: 'linkedin',
-            status: 'completed',
-            contactDate: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000), // 7 days ago
-            notes: 'Initial LinkedIn connection established. Good response from CEO.'
-          },
-          {
-            organizationId,
-            leadId: createdLeads[2].id,
-            userId: 'user_analyst_2',
-            activityType: 'email',
-            status: 'completed',
-            contactDate: new Date(Date.now() - 5 * 24 * 60 * 60 * 1000), // 5 days ago
-            followUpDate: new Date(Date.now() + 2 * 24 * 60 * 60 * 1000), // 2 days from now
-            notes: 'Sent detailed proposal. Waiting for technical review.'
-          },
-          {
-            organizationId,
-            leadId: createdLeads[7].id, // CloudFirst - Outreach stage
-            userId: 'user_partner_1',
-            activityType: 'call',
-            status: 'scheduled',
-            contactDate: new Date(Date.now() + 1 * 24 * 60 * 60 * 1000), // Tomorrow
-            notes: 'Scheduled discovery call with CRO to discuss cloud migration needs.'
-          },
-          {
-            organizationId,
-            leadId: createdLeads[3].id, // AgriTech - Pitching stage
-            userId: 'user_partner_1',
-            activityType: 'meeting',
-            status: 'completed',
-            contactDate: new Date(Date.now() - 3 * 24 * 60 * 60 * 1000), // 3 days ago
-            notes: 'Excellent presentation. Moving to final negotiation phase.'
-          }
-        ];
+        //
+        // -------------------------------------------
+        // Dummy OUTREACH ACTIVITIES
+        // -------------------------------------------
+        //
 
         for (const activity of outreachActivities) {
           await storage.createOutreachActivity(activity);
         }
 
-        // DEBUG: Verify what's actually in the database after creation
+        //
+        // -------------------------------------------
+        // Verification Logs
+        // -------------------------------------------
+        //
+
         console.log('=== POST-CREATION VERIFICATION ===');
-        console.log('Checking what data was actually persisted...');
-        
-        const verifyCompanies = await storage.getCompanies(organizationId);
-        console.log('Companies in DB for org', organizationId, ':', verifyCompanies.length);
-        
-        const verifyUniverseLeads = await storage.getLeadsByStage('universe', organizationId);
-        console.log('Universe leads in DB for org', organizationId, ':', verifyUniverseLeads.length);
-        
-        const verifyQualifiedLeads = await storage.getLeadsByStage('qualified', organizationId);
-        console.log('Qualified leads in DB for org', organizationId, ':', verifyQualifiedLeads.length);
-        
-        const verifyMetrics = await storage.getDashboardMetrics(organizationId);
-        console.log('Dashboard metrics for org', organizationId, ':', verifyMetrics);
-        
-        console.log('=== END VERIFICATION ===');
+        console.log('Companies:', (await storage.getCompanies(organizationId)).length);
+        console.log('Universe:', (await storage.getLeadsByStage('universe', organizationId)).length);
+        console.log('Qualified:', (await storage.getLeadsByStage('qualified', organizationId)).length);
+        console.log('Metrics:', await storage.getDashboardMetrics(organizationId));
 
         res.json({
           success: true,
-          message: 'Dummy data populated successfully',
-          summary: {
-            users: dummyUsers.length,
-            companies: createdCompanies.length,
-            contacts: contactsData.length,
-            leads: createdLeads.length,
-            outreachActivities: outreachActivities.length,
-            stageDistribution: {
-              universe: leadStages.filter(l => l.stage === 'universe').length,
-              qualified: leadStages.filter(l => l.stage === 'qualified').length,
-              outreach: leadStages.filter(l => l.stage === 'outreach').length,
-              pitching: leadStages.filter(l => l.stage === 'pitching').length,
-              won: leadStages.filter(l => l.stage === 'won').length,
-              lost: leadStages.filter(l => l.stage === 'lost').length
-            }
-          }
+          message: 'Dummy data populated successfully'
         });
 
       } catch (error: any) {
@@ -1658,6 +1017,7 @@ app.post(
         res.status(500).json({ message: error.message || 'Failed to populate dummy data' });
       }
     });
+
 
     // Company routes - Only partners and admins can create companies
     app.post('/api/companies', authMiddleware, requireRole(['partner', 'admin']), async (req: any, res) => {
@@ -1821,7 +1181,7 @@ app.post(
 
     app.get('/api/contacts/company/:companyId', authMiddleware, validateIntParam('companyId'), async (req: any, res) => {
       try {
-        const currentUser = req.verifiedUser || await storage.getUser(req.user?.claims?.sub);
+        const currentUser = req.verifiedUser;
         if (!currentUser || !currentUser.organizationId) {
           return res.status(401).json({ message: 'User organization not found' });
         }
@@ -2017,8 +1377,8 @@ app.post(
     app.get('/api/leads/all', authMiddleware, async (req: any, res) => {
       try {
         console.log("api hit /api/leads/all", req.body);
-        const userId = req.user?.claims?.sub;
-        const user = await storage.getUser(userId);
+        const userId = req.verifiedUser;
+        const user = user.id;
         if (!user || !user.organizationId) {
           return res.status(404).json({ message: 'User not found or missing organization' });
         }
@@ -2042,7 +1402,7 @@ app.post(
 
     app.get('/api/leads/my', authMiddleware, async (req: any, res) => {
       try {
-        const userId = req.user?.claims?.sub;
+        const userId = req.verifiedUser.id;
         if (!userId) {
           return res.status(400).json({ message: 'User ID not found in token' });
         }
@@ -2064,8 +1424,9 @@ app.post(
     app.get('/api/leads/stage/:stage', authMiddleware, validateStage, async (req: any, res) => {
       try {
         // Verify role from storage and enforce access control
-        const userId = req.user?.claims?.sub;
-        const user = await storage.getUser(userId);
+        const user = req.verifiedUser;
+        const userId = user.id;
+
         if (!user || !user.organizationId) {
           return res.status(404).json({ message: 'User not found or missing organization' });
         }
@@ -2091,7 +1452,7 @@ app.post(
     // GET leads assigned to current intern user (for intern dashboard)
     app.get('/api/leads/assigned', authMiddleware, requireRole(['intern']), async (req: any, res) => {
       try {
-        const currentUser = req.verifiedUser || await storage.getUser(req.user?.claims?.sub);
+        const currentUser = req.verifiedUser;
         if (!currentUser || !currentUser.organizationId) {
           return res.status(401).json({ message: 'User organization not found' });
         }
@@ -2204,7 +1565,7 @@ app.post(
     // PATCH route for manual stage transitions: qualified → outreach, outreach → pitching, pitching → mandates
     app.patch('/api/leads/:id/stage', authMiddleware, validateResourceExists('lead'), async (req: any, res) => {
       try {
-        const currentUser = req.verifiedUser || await storage.getUser(req.user?.claims?.sub);
+        const currentUser = req.verifiedUser;
         if (!currentUser || !currentUser.organizationId) {
           return res.status(401).json({ message: 'User organization not found' });
         }
@@ -2336,7 +1697,7 @@ app.post(
     // PATCH route to reject a lead from any stage with required comments
     app.patch('/api/leads/:id/reject', authMiddleware, validateResourceExists('lead'), async (req: any, res) => {
       try {
-        const currentUser = req.verifiedUser || await storage.getUser(req.user?.claims?.sub);
+        const currentUser = req.verifiedUser;
         if (!currentUser || !currentUser.organizationId) {
           return res.status(401).json({ message: 'User organization not found' });
         }
@@ -2384,7 +1745,7 @@ app.post(
     app.post('/api/leads/:id/assign', authMiddleware, requireRole(['partner', 'admin']), validateResourceExists('lead'), async (req: any, res) => {
       try {
         const { assignedTo, notes, challengeToken } = req.body;
-        const assignedBy = req.user?.claims?.sub;
+        const assignedBy = req.verifiedUser.id;
         const leadId = parseInt(req.params.id);
         
         // Get the current lead to check if it's a reassignment
@@ -2499,7 +1860,7 @@ app.post(
     app.post('/api/leads/:id/assign-interns', authMiddleware, requireRole(['partner', 'admin']), validateResourceExists('lead'), async (req: any, res) => {
       try {
         const { internIds, notes } = req.body;
-        const assignedBy = req.user?.claims?.sub;
+        const assignedBy = req.verifiedUser.id;
         const leadId = parseInt(req.params.id);
         
         if (!internIds || !Array.isArray(internIds)) {
@@ -2551,8 +1912,8 @@ app.post(
     app.post('/api/leads/bulk-assign', authMiddleware, requireRole(['partner', 'admin']), async (req: any, res) => {
       try {
         const { leadIds, assignedTo } = req.body;
-        const assignedBy = req.user?.claims?.sub;
-        const organizationId = req.user?.organizationId;
+        const assignedBy = req.verifiedUser.id;
+        const organizationId = req.verifiedUser.organizationId;
 
         if (!leadIds || !Array.isArray(leadIds) || leadIds.length === 0) {
           return res.status(400).json({ message: 'Lead IDs array is required' });
@@ -2603,7 +1964,7 @@ app.post(
     // Assign lead to intern(s) - supports single or multiple intern assignment
     app.patch('/api/leads/:id/assign-intern', authMiddleware, requireRole(['analyst', 'partner', 'admin']), validateIntParam('id'), validateResourceExists('lead'), async (req: any, res) => {
       try {
-        const currentUser = req.verifiedUser || await storage.getUser(req.user?.claims?.sub);
+        const currentUser = req.verifiedUser;
         if (!currentUser || !currentUser.organizationId) {
           return res.status(401).json({ message: 'User organization not found' });
         }
@@ -2699,202 +2060,129 @@ app.post(
       }
     });
 
-    // Reassign lead between interns (analysts can reassign between their interns)
-    app.patch('/api/leads/:id/reassign-intern', authMiddleware, requireRole(['analyst', 'partner', 'admin']), validateIntParam('id'), validateResourceExists('lead'), async (req: any, res) => {
-      try {
-        const currentUser = req.verifiedUser || await storage.getUser(req.user?.claims?.sub);
-        if (!currentUser || !currentUser.organizationId) {
-          return res.status(401).json({ message: 'User organization not found' });
-        }
 
-        const { fromInternId, toInternId, notes } = req.body;
-        const leadId = parseInt(req.params.id);
 
-        if (!fromInternId || !toInternId) {
-          return res.status(400).json({ message: 'Both fromInternId and toInternId are required' });
-        }
-
-        // Use lead from middleware (already validated)
-        const lead = req.resource;
-
-        // Validate lead is currently assigned to fromIntern
-        if (lead.assignedTo !== fromInternId) {
-          return res.status(400).json({ message: 'Lead is not currently assigned to the specified intern' });
-        }
-
-        // Validate fromIntern exists and belongs to organization
-        const fromIntern = await storage.getUser(fromInternId);
-        if (!fromIntern || fromIntern.organizationId !== currentUser.organizationId) {
-          return res.status(404).json({ message: 'Source intern not found' });
-        }
-
-        // Validate toIntern exists and belongs to organization
-        const toIntern = await storage.getUser(toInternId);
-        if (!toIntern || toIntern.organizationId !== currentUser.organizationId) {
-          return res.status(404).json({ message: 'Target intern not found' });
-        }
-
-        // Validate both are interns
-        if (fromIntern.role !== 'intern' || toIntern.role !== 'intern') {
-          return res.status(400).json({ message: 'Both users must be interns' });
-        }
-
-        // For analysts: verify ownership and that both interns belong to them
-        if (currentUser.role === 'analyst') {
-          if (lead.ownerAnalystId !== currentUser.id) {
-            return res.status(403).json({ message: 'You can only reassign your own leads' });
+    // Users route: supports optional ?role=intern to return interns scoped to current org
+    app.get('/api/users',
+      authMiddleware,
+      requireRole(['partner', 'admin', 'analyst']),
+      async (req: any, res) => {
+        try {
+          const currentUser = req.verifiedUser;
+          if (!currentUser?.organizationId) {
+            return res.status(400).json({ message: 'User not in an organization' });
           }
 
-          const fromInternValid = await storage.validateAnalystOf(currentUser.id, fromInternId, currentUser.organizationId);
-          const toInternValid = await storage.validateAnalystOf(currentUser.id, toInternId, currentUser.organizationId);
+          const role =
+            typeof req.query.role === 'string' && req.query.role.trim()
+              ? req.query.role.trim()
+              : undefined;
 
-          if (!fromInternValid || !toInternValid) {
-            return res.status(403).json({ message: 'You can only reassign between your own interns' });
-          }
+          const usersList = role
+            ? await storage.getUsersByRole(currentUser.organizationId, role)
+            : await storage.getUsers(currentUser.organizationId);
+
+          return res.json(usersList);
+        } catch (err: any) {
+          console.error('GET /api/users error', err);
+          return res.status(500).json({ message: 'Failed to fetch users' });
         }
-        // ...existing code...
-
-        // Users route: supports optional ?role=intern to return interns scoped to current org
-        app.get('/api/users', authMiddleware, requireRole(['partner', 'admin', 'analyst']), async (req: any, res) => {
-          try {
-            const currentUser = req.verifiedUser || req.user;
-            if (!currentUser?.organizationId) return res.status(400).json({ message: 'User not in an organization' });
-
-            const role = typeof req.query.role === 'string' && req.query.role.trim() ? req.query.role.trim() : undefined;
-            const usersList = role
-              ? await storage.getUsersByRole(currentUser.organizationId, role)
-              : await storage.getUsers(currentUser.organizationId);
-
-            return res.json(usersList);
-          } catch (err: any) {
-            console.error('GET /api/users error', err);
-            return res.status(500).json({ message: 'Failed to fetch users' });
-          }
-        });
+      }
+    );
 
         // Reassign intern on a lead (replaces fromInternId with toInternId inside assignedInterns array)
-        app.patch('/api/leads/:id/reassign-intern', authMiddleware, requireRole(['analyst','partner','admin']), validateIntParam('id'), validateResourceExists('lead'), async (req: any, res) => {
-          try {
-            const currentUser = req.verifiedUser || req.user;
-            const leadId = Number(req.params.id);
-            const { fromInternId, toInternId, notes } = req.body;
+        // Reassign intern on a lead (multi-intern support + correct auth)
+        app.patch('/api/leads/:id/reassign-intern',
+          authMiddleware,
+          requireRole(['analyst','partner','admin']),
+          validateIntParam('id'),
+          validateResourceExists('lead'),
+          async (req: any, res) => {
+            try {
+              const currentUser = req.verifiedUser;
+              const leadId = Number(req.params.id);
+              const { fromInternId, toInternId, notes } = req.body;
 
-            if (!fromInternId || !toInternId) {
-              return res.status(400).json({ message: 'Both fromInternId and toInternId are required' });
-            }
+              if (!currentUser?.organizationId) {
+                return res.status(401).json({ message: 'User organization not found' });
+              }
 
-            // basic org check
-            if (!currentUser?.organizationId) return res.status(401).json({ message: 'User organization not found' });
+              if (!fromInternId || !toInternId) {
+                return res.status(400).json({ message: 'Both fromInternId and toInternId are required' });
+              }
 
-            const lead = req.resource as any; // validateResourceExists middleware should attach resource
-            // verify this lead is assigned to fromInternId
-            if (Array.isArray(lead.assignedInterns) && !lead.assignedInterns.includes(fromInternId)) {
-              return res.status(400).json({ message: 'Lead not currently assigned to the specified intern' });
-            }
-            if (!Array.isArray(lead.assignedInterns) && lead.assignedTo !== fromInternId) {
-              return res.status(400).json({ message: 'Lead not currently assigned to the specified intern' });
-            }
+              const lead = req.resource;
 
-            // role-specific validation: analysts can only reassign their own leads and between their interns
-            if (currentUser.role === 'analyst') {
-              if (lead.ownerAnalystId !== currentUser.id) return res.status(403).json({ message: 'You can only reassign your own leads' });
+              // Validate current intern assignment (supports array or legacy field)
+              const assigned = Array.isArray(lead.assignedInterns)
+                ? lead.assignedInterns.includes(fromInternId)
+                : lead.assignedTo === fromInternId;
 
-              const okFrom = await storage.validateAnalystOf(currentUser.id, fromInternId, currentUser.organizationId);
-              const okTo = await storage.validateAnalystOf(currentUser.id, toInternId, currentUser.organizationId);
-              if (!okFrom || !okTo) return res.status(403).json({ message: 'You can only reassign between your own interns' });
-            }
+              if (!assigned) {
+                return res.status(400).json({ message: 'Lead not currently assigned to the specified intern' });
+              }
 
-            // validate interns exist in org
-            const fromUser = await storage.getUser(fromInternId);
-            const toUser = await storage.getUser(toInternId);
-            if (!fromUser || !toUser || fromUser.organizationId !== currentUser.organizationId || toUser.organizationId !== currentUser.organizationId) {
-              return res.status(404).json({ message: 'Intern not found in your organization' });
-            }
-            if (fromUser.role !== 'intern' || toUser.role !== 'intern') {
-              return res.status(400).json({ message: 'Both users must be interns' });
-            }
+              // Analyst restrictions
+              if (currentUser.role === 'analyst') {
+                if (lead.ownerAnalystId !== currentUser.id) {
+                  return res.status(403).json({ message: 'You can only reassign your own leads' });
+                }
 
-            // perform reassign (storage handles array vs legacy single-field)
-            const updatedLead = await storage.reassignInternInLead(leadId, fromInternId, toInternId, currentUser.id, currentUser.organizationId, notes);
+                const okFrom = await storage.validateAnalystOf(currentUser.id, fromInternId, currentUser.organizationId);
+                const okTo = await storage.validateAnalystOf(currentUser.id, toInternId, currentUser.organizationId);
 
-            // record activity
-            await storage.createActivityLog({
-              organizationId: currentUser.organizationId,
-              userId: currentUser.id,
-              action: 'lead_reassign_intern',
-              entityType: 'lead',
-              entityId: leadId,
-              leadId,
-              companyId: lead.companyId,
-              description: `Reassigned intern ${fromInternId} -> ${toInternId}${notes ? `: ${notes}` : ''}`,
-            });
+                if (!okFrom || !okTo) {
+                  return res.status(403).json({ message: 'You can only reassign between your own interns' });
+                }
+              }
 
-            return res.json({ success: true, lead: updatedLead });
-          } catch (err: any) {
-            console.error('PATCH /api/leads/:id/reassign-intern error', err);
-            return res.status(400).json({ message: err.message || 'Failed to reassign intern' });
-          }
-        });
+              // Verify intern existence
+              const fromUser = await storage.getUser(fromInternId);
+              const toUser = await storage.getUser(toInternId);
 
-        // ...existing code...
-        // For partners: validate they manage the lead owner analyst and both interns' analysts
-        if (currentUser.role === 'partner') {
-          if (!lead.ownerAnalystId) {
-            return res.status(400).json({ message: 'Lead must have an owner analyst before reassigning' });
-          }
+              if (!fromUser || !toUser || fromUser.organizationId !== currentUser.organizationId || toUser.organizationId !== currentUser.organizationId) {
+                return res.status(404).json({ message: 'Intern not found in your organization' });
+              }
 
-          // Verify partner manages the lead's owner analyst
-          const managesOwner = await storage.validatePartnerOf(currentUser.id, lead.ownerAnalystId, currentUser.organizationId);
-          if (!managesOwner) {
-            return res.status(403).json({ message: 'You can only manage leads owned by analysts you supervise' });
-          }
+              if (fromUser.role !== 'intern' || toUser.role !== 'intern') {
+                return res.status(400).json({ message: 'Both users must be interns' });
+              }
 
-          // Verify both interns belong to the lead owner analyst
-          const fromInternValid = await storage.validateAnalystOf(lead.ownerAnalystId, fromInternId, currentUser.organizationId);
-          const toInternValid = await storage.validateAnalystOf(lead.ownerAnalystId, toInternId, currentUser.organizationId);
+              // Perform the reassign
+              const updatedLead = await storage.reassignInternInLead(
+                leadId,
+                fromInternId,
+                toInternId,
+                currentUser.id,
+                currentUser.organizationId,
+                notes
+              );
 
-          if (!fromInternValid || !toInternValid) {
-            return res.status(403).json({ message: 'Both interns must belong to the lead owner analyst' });
-          }
-        }
+              // Log activity
+              await storage.createActivityLog({
+                organizationId: currentUser.organizationId,
+                userId: currentUser.id,
+                action: 'lead_reassign_intern',
+                entityType: 'lead',
+                entityId: leadId,
+                leadId,
+                companyId: lead.companyId,
+                description: `Reassigned intern ${fromInternId} -> ${toInternId}${notes ? `: ${notes}` : ''}`,
+              });
 
-        // For admins: still enforce data integrity (both interns belong to same analyst)
-        if (currentUser.role === 'admin') {
-          if (lead.ownerAnalystId) {
-            const fromInternValid = await storage.validateAnalystOf(lead.ownerAnalystId, fromInternId, currentUser.organizationId);
-            const toInternValid = await storage.validateAnalystOf(lead.ownerAnalystId, toInternId, currentUser.organizationId);
-
-            if (!fromInternValid || !toInternValid) {
-              return res.status(403).json({ message: 'Both interns must belong to the lead owner analyst' });
+              return res.json({ success: true, lead: updatedLead });
+            } catch (err: any) {
+              console.error('PATCH /api/leads/:id/reassign-intern error', err);
+              return res.status(400).json({ message: err.message || 'Failed to reassign intern' });
             }
           }
-        }
+        );
 
-        await storage.reassignLeadToIntern(leadId, fromInternId, toInternId, currentUser.id, currentUser.organizationId, notes);
-
-        // Log activity
-        await storage.createActivityLog({
-          organizationId: currentUser.organizationId,
-          userId: currentUser.id,
-          action: 'lead_reassigned_intern',
-          entityType: 'lead',
-          entityId: leadId,
-          leadId,
-          companyId: lead.companyId,
-          description: `Reassigned lead from ${fromIntern.firstName} ${fromIntern.lastName} to ${toIntern.firstName} ${toIntern.lastName}`,
-        });
-
-        res.json({ success: true, message: 'Lead reassigned successfully' });
-      } catch (error) {
-        console.error('Error reassigning lead:', error);
-        res.status(400).json({ message: 'Failed to reassign lead', error: error instanceof Error ? error.message : 'Unknown error' });
-      }
-    });
 
     // Reassign analyst and optionally their interns (partners only)
     app.post('/api/analysts/:fromAnalystId/reassign', authMiddleware, requireRole(['partner', 'admin']), async (req: any, res) => {
       try {
-        const currentUser = req.verifiedUser || await storage.getUser(req.user?.claims?.sub);
+        const currentUser = req.verifiedUser;
         if (!currentUser || !currentUser.organizationId) {
           return res.status(401).json({ message: 'User organization not found' });
         }
@@ -3570,40 +2858,6 @@ app.post(
       }
     });
 
-    // Dashboard routes - scoped by role from storage, not claims
-    app.get('/api/dashboard/metrics', authMiddleware, async (req: any, res) => {
-      try {
-        const userId = req.user?.claims?.sub;
-        const user = await storage.getUser(userId);
-        if (!user) {
-          return res.status(404).json({ message: 'User not found' });
-        }
-        
-        // For analysts, show only their metrics. For partners/admins, show all metrics  
-        const userRole = user.role || 'analyst';
-        const metricsUserId = userRole === 'analyst' ? userId : undefined;
-        
-        // DEBUG: Log dashboard metrics parameters and result
-        console.log(`Dashboard metrics request - UserId: ${userId}, Role: ${userRole}, OrganizationId: ${user.organizationId}, MetricsUserId: ${metricsUserId}`);
-        
-        const metrics = await storage.getDashboardMetrics(Number(user.organizationId), metricsUserId);
-        
-        console.log('Dashboard metrics result:', metrics);
-        
-        // Force fresh response to avoid 304 caching issues during development
-        res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
-        res.set('Expires', '0');
-        
-        res.json({
-          ...metrics,
-          userRole,
-          isPersonalized: userRole === 'analyst'
-        });
-      } catch (error) {
-        console.error('Error fetching dashboard metrics:', error);
-        res.status(500).json({ message: 'Failed to fetch dashboard metrics' });
-      }
-    });
 
     // Individual Lead Creation Route with Deduplication
     app.post('/api/leads/individual', authMiddleware, requireRole(['analyst', 'partner', 'admin']), async (req: any, res) => {

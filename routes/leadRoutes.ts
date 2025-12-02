@@ -39,6 +39,52 @@ router.post('/:id/assign', requireRole(['partner', 'admin',]), validateResourceE
 router.post('/:id/assign-interns', requireRole(['partner', 'admin']), validateResourceExists('lead'), leadController.assignInternsToLead);
 router.patch('/:id/assign-intern', requireRole(['analyst', 'partner', 'admin']), validateIntParam('id'), validateResourceExists('lead'), leadController.assignInternToLead);
 
+
+// --------------------------------------------
+// LEAD DETAILS (Upcoming Tasks + anything else)
+// --------------------------------------------
+router.get("/:id/details",
+  requireRole(["analyst", "partner", "admin"]),
+  validateIntParam("id"),
+  validateResourceExists("lead"),
+  async (req: any, res) => {
+    try {
+      const leadId = Number(req.params.id);
+      const organizationId = req.verifiedUser.organizationId;
+      
+      console.log("DETAIL ROUTE -> user:", req.verifiedUser);
+      console.log("DETAIL ROUTE -> leadId:", leadId);
+      console.log("DETAIL ROUTE -> orgId:", organizationId);
+      // Fetch future tasks for this lead
+      const upcomingTasks = await storage.getUpcomingTasksForLead(
+        leadId,
+        organizationId
+      );
+      console.log("DETAIL ROUTE -> tasks:", upcomingTasks);
+      res.json({
+        upcomingTasks,   // frontend expects this key
+      });
+
+    } catch (err) {
+      console.error("Error loading lead details:", err);
+      res.status(500).json({ message: "Failed to load lead details" });
+    }
+  }
+);
+
+router.get(
+  "/scheduled",
+  requireRole(["admin", "analyst", "partner"]),
+  async (req: any, res) => {
+    const organizationId = req.verifiedUser.organizationId;
+    const list = await storage.getScheduledInterventions(req.verifiedUser);
+    // const list = await storage.getScheduledInterventions(organizationId);
+    res.json(list);
+  }
+);
+
+
+
 // --------------------------------------------
 // GET remarks
 // --------------------------------------------
@@ -127,20 +173,58 @@ router.get("/:id/actionables",
   async (req: any, res) => {
     try {
       const currentUser = req.verifiedUser;
+      const orgId = currentUser.organizationId;
       const leadId = Number(req.params.id);
 
-      const items = await storage.getLeadActionables(
-        leadId,
-        currentUser.organizationId
-      );
+      // 1. Fetch lead for permission checks
+      const lead = await storage.getLead(leadId, orgId);
+      if (!lead) {
+        return res.status(404).json({ message: "Lead not found" });
+      }
 
-      res.json(items);
+      // 2. Analyst permissions
+      if (currentUser.role === "analyst") {
+        const isOwner = lead.ownerAnalystId === currentUser.id;
+        const isAssigned = lead.assignedTo === currentUser.id;
+
+        if (!isOwner && !isAssigned) {
+          return res.status(403).json({ message: "Not allowed to view tasks for this lead" });
+        }
+      }
+
+      // 3. Fetch all tasks for this lead
+      const items = await storage.getActionablesByLead(leadId, orgId);
+
+      return res.json(items);
+
     } catch (err) {
       console.error("Error fetching actionables:", err);
       res.status(500).json({ message: "Failed to fetch actionables" });
     }
   }
 );
+
+// router.get("/:id/actionables",
+//   requireRole(["analyst", "partner", "admin", "intern"]),
+//   validateIntParam("id"),
+//   validateResourceExists("lead"),
+//   async (req: any, res) => {
+//     try {
+//       const currentUser = req.verifiedUser;
+//       const leadId = Number(req.params.id);
+
+//       const items = await storage.getLeadActionables(
+//         leadId,
+//         currentUser.organizationId
+//       );
+
+//       res.json(items);
+//     } catch (err) {
+//       console.error("Error fetching actionables:", err);
+//       res.status(500).json({ message: "Failed to fetch actionables" });
+//     }
+//   }
+// );
 
 // ADD Actionable
 router.post("/:id/actionables",
