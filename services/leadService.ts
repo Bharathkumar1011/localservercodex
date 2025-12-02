@@ -23,14 +23,22 @@ export const leadService = {
     
     // Security: Derive ownerAnalystId from session, not client
     const ownerAnalystId = currentUser.role === 'analyst' ? currentUser.id : null;
-    const assignedTo = null;
+    // const assignedTo = null;
+
+    // NEW: auto-assign lead to analyst so they can see it
+    const assignedTo = currentUser.role === 'analyst' ? currentUser.id : null;
     
+    // Change is here 👇
+    const stage = currentUser.role === 'analyst' ? 'qualified' : 'universe';
+
     const lead = await storage.createLead({ 
       ...validatedData, 
       organizationId: currentUser.organizationId,
       ownerAnalystId,
       assignedTo,
-      stage: 'universe'
+      stage  // ✅ Add this line
+      // stage: 'universe'
+      // stage: currentUser.role === 'analyst' ? 'qualified' : 'universe'
     });
     
     // Log activity
@@ -569,11 +577,17 @@ export const leadService = {
     const universeStatus = validatedData.assignedTo ? 'assigned' : 'open';
     const ownerAnalystId = currentUser.role === 'analyst' ? currentUser.id : null;
     
+    // Auto-assign & auto-stage for analysts
+    const assignedTo =
+      validatedData.assignedTo ??
+      (currentUser.role === 'analyst' ? currentUser.id : null);
+
+    const stage = currentUser.role === 'analyst' ? 'qualified' : 'universe';
     // Create lead for the company
     const lead = await storage.createLead({
       organizationId: currentUser.organizationId,
       companyId: Number(companyResult.company.id),
-      stage: 'universe',
+      stage,
       universeStatus,
       ownerAnalystId,
       assignedTo: validatedData.assignedTo || null,

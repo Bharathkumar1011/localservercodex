@@ -1,5 +1,7 @@
 import { Request } from 'express';
 import { storage } from '../storage.js';
+import { supabaseAdmin } from "../supabaseAdmin.js";
+import crypto from "crypto";
 
 export const userService = {
   getUsers: async (req: Request) => {
@@ -20,62 +22,82 @@ export const userService = {
     return await storage.getUserAnalytics(currentUser.organizationId);
   },
 
-  createUser: async (userData: any, req: Request) => {
-    const { id, email, firstName, lastName, role = 'analyst', analystId } = userData;
-    const currentUser = (req as any).verifiedUser;
-    
-    if (!currentUser?.organizationId) {
-      throw new Error('User not associated with an organization');
-    }
-    
-    if (!id || !email || !firstName || !lastName) {
-      throw new Error('Missing required fields: id, email, firstName, lastName');
-    }
-    
-    if (!['analyst', 'partner', 'admin', 'intern'].includes(role)) {
-      throw new Error('Invalid role');
-    }
-    
-    // For interns, analystId is required
-    if (role === 'intern' && !analystId) {
-      throw new Error('Intern must be assigned to an analyst');
-    }
-    
-    // Validate analyst exists and belongs to same organization
-    if (role === 'intern' && analystId) {
-      const analyst = await storage.getUser(analystId);
-      if (!analyst || analyst.organizationId !== currentUser.organizationId || analyst.role !== 'analyst') {
-        throw new Error('Invalid analyst assignment');
-      }
-    }
+createUser: async (userData: any, req: Request) => {
+  const { email, firstName, lastName, role = 'analyst', analystId } = userData;
+  const currentUser = (req as any).verifiedUser;
 
-    // Check if user already exists by ID
-    const existingUser = await storage.getUser(id);
-    if (existingUser) {
-      throw new Error('User already exists');
+  if (!currentUser?.organizationId) {
+    throw new Error('User not associated with an organization');
+  }
+
+  if (!email || !firstName || !lastName) {
+    throw new Error('Missing required fields: email, firstName, lastName');
+  }
+
+  const normalizedEmail = email.toLowerCase().trim();
+
+  if (!['analyst', 'partner', 'admin', 'intern'].includes(role)) {
+    throw new Error('Invalid role');
+  }
+
+  if (role === 'intern' && !analystId) {
+    throw new Error('Intern must be assigned to an analyst');
+  }
+
+  if (role === 'intern' && analystId) {
+    const analyst = await storage.getUser(analystId);
+    if (!analyst || analyst.organizationId !== currentUser.organizationId || analyst.role !== 'analyst') {
+      throw new Error('Invalid analyst assignment');
     }
+  }
 
-    // Check if email already exists within the organization
-    const existingUsers = await storage.getUsers(currentUser.organizationId);
-    const userWithEmail = existingUsers.find(u => u.email === email);
-    if (userWithEmail) {
-      throw new Error('Email already exists');
-    }
+  const existingUsers = await storage.getUsers(currentUser.organizationId);
+  const userWithEmail = existingUsers.find(u => u.email.toLowerCase() === normalizedEmail);
+  if (userWithEmail) {
+    throw new Error('Email already exists');
+  }
 
-    const newUserData = {
-      id,
-      organizationId: currentUser.organizationId,
-      email,
-      firstName,
-      lastName,
-      role,
-      profileImageUrl: null,
-      ...(role === 'intern' && analystId ? { analystId } : {})
-    };
 
-    await storage.upsertUser(newUserData);
-    return await storage.getUser(id);
-  },
+
+const { data, error } = await supabaseAdmin.auth.admin.createUser({
+  email: normalizedEmail,
+  email_confirm: true,
+  password: crypto.randomUUID().replace(/-/g, ""),  // Temporary password, never used
+});
+
+if (error) {
+  console.error("Supabase Admin Create Error:", error);
+  throw new Error("Failed to create Supabase auth user");
+}
+
+const supabaseUserId = data.user.id;
+
+// STEP 2 — Send password-setup link (recovery link)
+const { error: linkError } = await supabaseAdmin.auth.admin.generateLink({
+  type: "recovery",
+  email: normalizedEmail,
+});
+
+if (linkError) {
+  console.error("Failed to send password setup email:", linkError);
+  throw new Error("Failed to send password setup email");
+}
+
+  const newUser = {
+    id: supabaseUserId,
+    organizationId: currentUser.organizationId,
+    email: normalizedEmail,
+    firstName,
+    lastName,
+    role,
+    profileImageUrl: null,
+    ...(role === 'intern' && analystId ? { analystId } : {})
+  };
+
+  await storage.upsertUser(newUser);
+
+  return await storage.getUser(supabaseUserId);
+},
 
   updateUserRole: async (userId: string, role: string, req: Request) => {
     const currentUser = (req as any).verifiedUser;

@@ -2,32 +2,29 @@ import { Request, Response } from 'express';
 import { authService } from '../services/authService.js';
 
 export const authController = {
-  // Mock auth endpoints
-  getMockRoles: (req: Request, res: Response) => {
-    const roles = authService.getMockRoles();
-    res.json({ roles });
+  // Mock auth endpoints now disabled
+  getMockRoles: (_req: Request, res: Response) => {
+    res.status(410).json({
+      message: 'Mock authentication has been removed. Authenticate with Supabase instead.'
+    });
   },
 
-  mockLogin: async (req: Request, res: Response) => {
-    try {
-      const { role } = req.body;
-      const result = await authService.mockLogin(role, req);
-      res.json(result);
-    } catch (error) {
-      res.status(500).json({
-        message: 'Login failed: ' + (error as Error).message
-      });
-    }
+  mockLogin: (_req: Request, res: Response) => {
+    res.status(410).json({
+      message: 'Mock authentication has been removed. Authenticate with Supabase instead.'
+    });
   },
 
-  mockLogout: (req: Request, res: Response) => {
-    authService.mockLogout(req);
-    res.json({ success: true });
+  mockLogout: (_req: Request, res: Response) => {
+    res.status(410).json({
+      message: 'Mock authentication has been removed. Authenticate with Supabase instead.'
+    });
   },
 
-  getMockStatus: (req: Request, res: Response) => {
-    const status = authService.getMockStatus(req);
-    res.json(status);
+  getMockStatus: (_req: Request, res: Response) => {
+    res.status(410).json({
+      message: 'Mock authentication has been removed. Authenticate with Supabase instead.'
+    });
   },
 
   // Real auth endpoints

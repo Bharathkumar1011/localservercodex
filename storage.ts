@@ -40,6 +40,8 @@ import { db } from "./db";
 import { eq, and, desc, sql, ilike, or, gte, lte, count, inArray } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { randomUUID } from 'crypto';
+import {  gt } from "drizzle-orm";
+
 
 // Interface for storage operations
 export interface IStorage {
@@ -258,6 +260,24 @@ async getLeadActionables(leadId: number, organizationId: number) {
     .orderBy(desc(leadActionables.createdAt));
 }
 
+// --------------------------------------------
+// UPCOMING TASKS for a specific lead
+// --------------------------------------------
+async getUpcomingTasksForLead(leadId: number, organizationId: number) {
+  return db
+    .select()
+    .from(interventions)
+    .where(
+      and(
+        eq(interventions.leadId, leadId),
+        eq(interventions.organizationId, organizationId),
+        gt(interventions.scheduledAt, new Date()) // only future tasks
+      )
+    )
+    .orderBy(interventions.scheduledAt);
+}
+
+
 async addLeadActionable(leadId: number, organizationId: number, userId: string, text: string) {
   const [inserted] = await db
     .insert(leadActionables)
@@ -280,6 +300,19 @@ async deleteLeadActionable(id: number, organizationId: number) {
         eq(leadActionables.organizationId, organizationId)
       )
     );
+}
+// Return ALL actionables for a lead (used in leadRoutes)
+async getActionablesByLead(leadId: number, organizationId: number) {
+  return db
+    .select()
+    .from(leadActionables)
+    .where(
+      and(
+        eq(leadActionables.leadId, leadId),
+        eq(leadActionables.organizationId, organizationId)
+      )
+    )
+    .orderBy(desc(leadActionables.createdAt));
 }
 
   // User operations
