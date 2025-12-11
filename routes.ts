@@ -754,12 +754,13 @@ app.post(
             stage: 'universe',
             universeStatus,
             ownerAnalystId,
-         assignedTo: assignedTo || null, 
+            assignedTo: assignedTo || null, 
             pocCount: 0,
             pocCompletionStatus: 'red',
             pipelineValue: null,
             probability: '0',
             notes: null,
+            createdBy: currentUser.id,   // ⭐ REQUIRED
           });
           results.successfulLeads++;
 
@@ -966,7 +967,8 @@ app.post(
                 ? '30'
                 : leadData.stage === 'qualified'
                 ? '15'
-                : '5'
+                : '5',
+            createdBy: currentUser.id,  // ⭐ REQUIRED    
           });
           createdLeads.push(lead);
         }
@@ -1351,7 +1353,8 @@ app.post(
           organizationId: currentUser.organizationId,
           ownerAnalystId,
           assignedTo,
-          stage: 'universe' // All leads start in universe stage
+          stage: 'universe', // All leads start in universe stage
+          createdBy: currentUser.id,   // ⭐ REQUIRED
         });
         
         // Log activity
@@ -1441,6 +1444,7 @@ app.post(
         } else {
           // Only partners and admins can see all leads in a stage
           const leads = await storage.getLeadsByStage(req.params.stage, user.organizationId);
+          console.log("🔥 [API] OUTGOING LEADS:", JSON.stringify(leads[0], null, 2));
           res.json(leads);
         }
       } catch (error) {
@@ -2434,27 +2438,85 @@ app.post(
           organizationId: currentUser.organizationId
         });
         
-        const activity = await storage.createOutreachActivity(activityData);
+
         
         // If a follow-up date is provided, also create an intervention record for Scheduled Tasks
+        const activity = await storage.createOutreachActivity(activityData);
+
+        // If a follow-up date is provided, also create intervention records for Scheduled Tasks
         if (followUpDate) {
           try {
-            await storage.createIntervention({
-              leadId: req.body.leadId,
-              // type: mapActivityTypeToInterventionType(req.body.activityType),
-              type: req.body.activityType,
-              scheduledAt: followUpDate,
-              notes: req.body.notes || 'Scheduled outreach activity',
-              organizationId: currentUser.organizationId,
-              userId: currentUser.id
-            });
+            const orgId = currentUser.organizationId;
+            const userId = currentUser.id;
+            const leadId = req.body.leadId;
+            const baseNotes = req.body.notes || 'Scheduled outreach activity';
+
+            // Normalize anchor date to 09:30 AM local
+            const baseDate = new Date(followUpDate);
+            baseDate.setHours(9, 30, 0, 0);
+
+            // Helper to add days
+            const addDays = (date: Date, days: number) => {
+              const d = new Date(date);
+              d.setDate(d.getDate() + days);
+              return d;
+            };
+
+            // Email D0 triggers the entire D0/D1/D3/D7 cadence
+            if (req.body.activityType === 'email_d0_analyst') {
+              const reminders = [
+                // D0 Tasks (same day)
+                { offset: 0, type: 'linkedin_request_self' },
+                { offset: 0, type: 'linkedin_messages_self' },
+                { offset: 0, type: 'linkedin_request_dinesh' },
+                { offset: 0, type: 'linkedin_messages_dinesh' },
+                { offset: 0, type: 'linkedin_request_kvs' },
+                { offset: 0, type: 'linkedin_messages_kvs' },
+
+                // D1 Tasks (+1 day)
+                { offset: 1, type: 'whatsapp_kvs' },
+                { offset: 1, type: 'call_d1_dinesh' },
+
+                // D3 Tasks (+3 days)
+                { offset: 3, type: 'email_d3_analyst' },
+                { offset: 3, type: 'whatsapp_dinesh' },
+
+                // D7 Tasks (+7 days)
+                { offset: 7, type: 'channel_partner' },
+                { offset: 7, type: 'email_d7_kvs' },
+              ];
+
+              for (const r of reminders) {
+                await storage.createIntervention({
+                  leadId,
+                  type: r.type,
+                  scheduledAt: addDays(baseDate, r.offset),
+                  notes: baseNotes,
+                  organizationId: orgId,
+                  userId,
+                  status: 'pending',
+                });
+              }
+            } else {
+              // Default behaviour: single reminder for whatever activity was scheduled
+              await storage.createIntervention({
+                leadId,
+                type: req.body.activityType,
+                scheduledAt: baseDate,
+                notes: baseNotes,
+                organizationId: orgId,
+                userId,
+                status: 'pending',
+              });
+            }
           } catch (interventionError) {
             console.error('Error creating intervention for scheduled outreach:', interventionError);
             // Don't fail the request if intervention creation fails
           }
         }
-        
+
         res.json(activity);
+
       } catch (error) {
         console.error('Error creating outreach activity:', error);
         res.status(400).json({ message: 'Failed to create outreach activity', error: error instanceof Error ? error.message : 'Unknown error' });
@@ -2646,7 +2708,13 @@ app.post(
           return res.status(401).json({ message: 'User organization not found' });
         }
         
-        const updates = interventionFormSchema.partial().parse(req.body);
+        const updates = interventionFormSchema
+          .extend({
+            status: z.enum(["pending", "completed"]).optional(),
+          })
+          .partial()
+          .parse(req.body);
+
         const intervention = await storage.updateIntervention(parseInt(req.params.id), currentUser.organizationId, updates);
         
         if (!intervention) {
@@ -2906,6 +2974,7 @@ app.post(
           pipelineValue: null,
           probability: '0',
           notes: null,
+          createdBy: currentUser.id,   // ⭐ REQUIRED
           // createdBy: formData.createdBy
         });
 

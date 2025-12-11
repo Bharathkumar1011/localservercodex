@@ -183,7 +183,9 @@ export const companyService = {
             companyId: company.id,
             stage: 'universe',
             universeStatus,
-            assignedTo
+            assignedTo,
+
+            createdBy: currentUser.id,   // ⭐ REQUIRED
           });
         }
 

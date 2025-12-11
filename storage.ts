@@ -98,7 +98,7 @@ export interface IStorage {
   deleteContact(id: number, organizationId: number): Promise<Contact | undefined>;
   
   // Lead operations
-  createLead(lead: UpsertLead): Promise<Lead>;
+  createLead(lead: UpsertLead & { createdBy: string }): Promise<Lead>;
   getLead(id: number, organizationId: number): Promise<Lead | undefined>;
   getLeadsByStage(stage: string, organizationId: number): Promise<(Lead & { company: Company; contact?: Contact; assignedToUser?: User; ownerAnalystUser?: User })[]>;
   getAllLeads(organizationId: number): Promise<(Lead & { company: Company; contact?: Contact; assignedToUser?: User; ownerAnalystUser?: User })[]>;
@@ -551,16 +551,50 @@ async getActionablesByLead(leadId: number, organizationId: number) {
     return contact;
   }
 
+  // // Lead operations
+  // async createLead(leadData: UpsertLead): Promise<Lead> {
+  //   const [lead] = await db.insert(leads).values(leadData).returning();
+  //   return lead;
+  // }
+  
   // Lead operations
-  async createLead(leadData: UpsertLead): Promise<Lead> {
-    const [lead] = await db.insert(leads).values(leadData).returning();
+  async createLead(leadData: UpsertLead & { createdBy: string }): Promise<Lead> {
+    const [lead] = await db
+      .insert(leads)
+      .values({
+        ...leadData,
+        createdBy: leadData.createdBy,   // Guarantees DB always gets the creator
+      })
+      .returning();
+
     return lead;
   }
 
-  async getLead(id: number, organizationId: number): Promise<Lead | undefined> {
-    const [lead] = await db.select().from(leads).where(and(eq(leads.id, id), eq(leads.organizationId, organizationId)));
-    return lead;
-  }
+
+async getLead(
+  id: number,
+  organizationId: number
+): Promise<(Lead & { createdByUser?: User }) | undefined> {
+
+  const creator = alias(users, "creator");
+
+  const [row] = await db
+    .select({
+      lead: leads,
+      createdByUser: creator
+    })
+    .from(leads)
+    .leftJoin(creator, eq(leads.createdBy, creator.id))
+    .where(and(eq(leads.id, id), eq(leads.organizationId, organizationId)));
+
+  if (!row) return undefined;
+
+  return {
+    ...row.lead,
+    createdByUser: row.createdByUser || undefined
+  };
+}
+
 
   async getLeadsByStage(stage: string, organizationId: number): Promise<(Lead & { company: Company; contact?: Contact; assignedToUser?: User; ownerAnalystUser?: User })[]> {
     // Universe stage shows both 'universe' and 'qualified' leads
@@ -571,7 +605,8 @@ async getActionablesByLead(leadId: number, organizationId: number) {
     
     const assignedToUsers = alias(users, 'assignedToUser');
     const ownerAnalystUsers = alias(users, 'ownerAnalystUser');
-    
+    const creator = alias(users, "creator");
+
     const result = await db
       .select({
         lead: leads,
@@ -579,15 +614,22 @@ async getActionablesByLead(leadId: number, organizationId: number) {
         contact: contacts,
         assignedToUser: assignedToUsers,
         ownerAnalystUser: ownerAnalystUsers,
+        createdByUser: creator,      // ⭐ NEW FIELD
       })
       .from(leads)
       .innerJoin(companies, eq(leads.companyId, companies.id))
       .leftJoin(contacts, and(eq(contacts.companyId, companies.id), eq(contacts.isPrimary, true)))
       .leftJoin(assignedToUsers, eq(leads.assignedTo, assignedToUsers.id))
       .leftJoin(ownerAnalystUsers, eq(leads.ownerAnalystId, ownerAnalystUsers.id))
+      .leftJoin(creator, eq(leads.createdBy, creator.id))          // ⭐ NEW JOIN
       .where(and(stageCondition, eq(leads.organizationId, organizationId)))
       .orderBy(desc(leads.updatedAt));
-    
+
+      console.log(
+        "🔥 [BACKEND] getLeadsByStage() FIRST ROW:",
+        JSON.stringify(result[0], null, 2)
+      );
+
     // De-duplicate leads by ID (in case multiple primary contacts exist)
     const leadMap = new Map<number, Lead & { company: Company; contact?: Contact; assignedToUser?: User; ownerAnalystUser?: User }>();
     
@@ -598,7 +640,8 @@ async getActionablesByLead(leadId: number, organizationId: number) {
           company: r.company,
           contact: r.contact || undefined,
           assignedToUser: r.assignedToUser || undefined,
-          ownerAnalystUser: r.ownerAnalystUser || undefined
+          ownerAnalystUser: r.ownerAnalystUser || undefined,
+          createdByUser: r.createdByUser || undefined // ⭐ NEW FIELD
         });
       }
     }
@@ -606,9 +649,10 @@ async getActionablesByLead(leadId: number, organizationId: number) {
     return Array.from(leadMap.values());
   }
 
-  async getAllLeads(organizationId: number): Promise<(Lead & { company: Company; contact?: Contact; assignedToUser?: User; assignedInternUsers?: User[]; ownerAnalystUser?: User })[]> {
+  async getAllLeads(organizationId: number): Promise<(Lead & { company: Company; contact?: Contact; assignedToUser?: User; assignedInternUsers?: User[]; ownerAnalystUser?: User; createdByUser?: User })[]> {
     const assignedToUsers = alias(users, 'assignedToUser');
     const ownerAnalystUsers = alias(users, 'ownerAnalystUser');
+    const creator = alias(users, "creator");
     
     const result = await db
       .select({
@@ -617,14 +661,23 @@ async getActionablesByLead(leadId: number, organizationId: number) {
         contact: contacts,
         assignedToUser: assignedToUsers,
         ownerAnalystUser: ownerAnalystUsers,
+        createdByUser: creator
       })
+      
       .from(leads)
       .innerJoin(companies, eq(leads.companyId, companies.id))
       .leftJoin(contacts, and(eq(contacts.companyId, companies.id), eq(contacts.isPrimary, true)))
       .leftJoin(assignedToUsers, eq(leads.assignedTo, assignedToUsers.id))
       .leftJoin(ownerAnalystUsers, eq(leads.ownerAnalystId, ownerAnalystUsers.id))
+      .leftJoin(creator, eq(leads.createdBy, creator.id))
       .where(eq(leads.organizationId, organizationId))
       .orderBy(desc(leads.updatedAt));
+
+      console.log(
+        "🔥 [BACKEND] getLeadsByStage() FIRST ROW:",
+        JSON.stringify(result[0], null, 2)
+      );
+
     
     // De-duplicate leads by ID (in case multiple primary contacts exist)
     const leadMap = new Map<number, Lead & { company: Company; contact?: Contact; assignedToUser?: User; assignedInternUsers?: User[]; ownerAnalystUser?: User }>();
@@ -637,7 +690,8 @@ async getActionablesByLead(leadId: number, organizationId: number) {
           contact: r.contact || undefined,
           assignedToUser: r.assignedToUser || undefined,
           assignedInternUsers: [],
-          ownerAnalystUser: r.ownerAnalystUser || undefined
+          ownerAnalystUser: r.ownerAnalystUser || undefined,
+          createdByUser: r.createdByUser || undefined
         });
       }
     }
@@ -678,30 +732,37 @@ async getActionablesByLead(leadId: number, organizationId: number) {
     return leadsArray;
   }
 
-  async getLeadsByAssignee(userId: string, organizationId: number): Promise<(Lead & { company: Company; contact?: Contact; assignedToUser?: User; assignedInternUsers?: User[] })[]> {
+  // In storage.ts
+
+  async getLeadsByAssignee(userId: string, organizationId: number): Promise<(Lead & { company: Company; contact?: Contact; assignedToUser?: User; assignedInternUsers?: User[]; createdByUser?: User })[]> {
+    // 1. DEFINE THE ALIAS
+    const creator = alias(users, "creator"); 
+
     const result = await db
       .select({
         lead: leads,
         company: companies,
         contact: contacts,
         assignedToUser: users,
+        createdByUser: creator // 2. SELECT THE CREATOR
       })
       .from(leads)
       .innerJoin(companies, eq(leads.companyId, companies.id))
       .leftJoin(contacts, and(eq(contacts.companyId, companies.id), eq(contacts.isPrimary, true)))
       .leftJoin(users, eq(leads.assignedTo, users.id))
+      .leftJoin(creator, eq(leads.createdBy, creator.id)) // 3. JOIN THE CREATOR TABLE
       .where(and(
         or(
-          eq(leads.ownerAnalystId, userId),  // Analysts see leads they own (created)
-          eq(leads.assignedTo, userId)        // Also see leads assigned to them
+          eq(leads.ownerAnalystId, userId),
+          eq(leads.assignedTo, userId)
         ),
         eq(leads.organizationId, organizationId)
       ))
       .orderBy(desc(leads.updatedAt));
-    
+
     // De-duplicate leads by ID (in case multiple primary contacts exist)
-    const leadMap = new Map<number, Lead & { company: Company; contact?: Contact; assignedToUser?: User; assignedInternUsers?: User[] }>();
-    
+    const leadMap = new Map<number, Lead & { company: Company; contact?: Contact; assignedToUser?: User; assignedInternUsers?: User[]; createdByUser?: User }>(); // Updated Type
+
     for (const r of result) {
       if (!leadMap.has(r.lead.id)) {
         leadMap.set(r.lead.id, {
@@ -709,13 +770,14 @@ async getActionablesByLead(leadId: number, organizationId: number) {
           company: r.company,
           contact: r.contact || undefined,
           assignedToUser: r.assignedToUser || undefined,
-          assignedInternUsers: []
+          assignedInternUsers: [],
+          createdByUser: r.createdByUser || undefined // 4. MAP THE CREATOR
         });
       }
     }
-    
+
     const leadsArray = Array.from(leadMap.values());
-    
+
     // Fetch assigned interns for all leads
     const leadIds = leadsArray.map(l => l.id);
     if (leadIds.length > 0) {
@@ -726,7 +788,7 @@ async getActionablesByLead(leadId: number, organizationId: number) {
           allInternIds.push(...lead.assignedInterns);
         }
       }
-      
+
       // Fetch all interns in one query
       if (allInternIds.length > 0) {
         const uniqueInternIds = [...new Set(allInternIds)];
@@ -734,9 +796,10 @@ async getActionablesByLead(leadId: number, organizationId: number) {
           .select()
           .from(users)
           .where(inArray(users.id, uniqueInternIds));
-        
+
         // Map interns to leads
         const internsMap = new Map(assignedInterns.map(u => [u.id, u]));
+
         for (const lead of leadsArray) {
           if (lead.assignedInterns && Array.isArray(lead.assignedInterns)) {
             lead.assignedInternUsers = lead.assignedInterns
@@ -746,9 +809,10 @@ async getActionablesByLead(leadId: number, organizationId: number) {
         }
       }
     }
-    
+
     return leadsArray;
   }
+
 
   async getLeadsByCompany(companyId: number, organizationId: number): Promise<Lead[]> {
     const result = await db
@@ -974,7 +1038,13 @@ async getActionablesByLead(leadId: number, organizationId: number) {
       .innerJoin(companies, eq(leads.companyId, companies.id))
       .leftJoin(contacts, and(eq(contacts.companyId, companies.id), eq(contacts.isPrimary, true)))
       .leftJoin(users, eq(interventions.userId, users.id))
-      .where(eq(interventions.organizationId, user.organizationId))
+      .where(
+        and(
+          eq(interventions.organizationId, user.organizationId),
+          eq(interventions.userId, user.id),
+          eq(interventions.status, 'pending')   // ← ADD THIS
+        )
+      )
       .orderBy(interventions.scheduledAt);
 
     console.log('[getScheduledInterventions] Query result count:', result.length);
@@ -1241,8 +1311,17 @@ async getActionablesByLead(leadId: number, organizationId: number) {
     leadsCountByStage: { [stage: string]: number };
   }> {
     const orgWhereClause = eq(leads.organizationId, organizationId);
-    const whereClause = userId ? and(orgWhereClause, eq(leads.assignedTo, userId)) : orgWhereClause;
-    
+    // const whereClause = userId ? and(orgWhereClause, eq(leads.assignedTo, userId)) : orgWhereClause;
+    const whereClause = userId
+  ? and(
+      orgWhereClause,
+      or(
+        eq(leads.assignedTo, userId),
+        eq(leads.ownerAnalystId, userId)
+      )
+    )
+  : orgWhereClause;
+
     const [totalResult] = await db
       .select({ count: sql<number>`count(*)` })
       .from(leads)

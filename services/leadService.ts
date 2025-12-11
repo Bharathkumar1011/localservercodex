@@ -36,10 +36,11 @@ export const leadService = {
       organizationId: currentUser.organizationId,
       ownerAnalystId,
       assignedTo,
-      stage  // ✅ Add this line
-      // stage: 'universe'
-      // stage: currentUser.role === 'analyst' ? 'qualified' : 'universe'
+      stage,
+
+      createdBy: currentUser.id,   // ⭐ REQUIRED
     });
+
     
     // Log activity
     await storage.createActivityLog({
@@ -596,6 +597,8 @@ export const leadService = {
       pipelineValue: null,
       probability: '0',
       notes: null,
+
+      createdBy: currentUser.id,   // ⭐ REQUIRED
     });
 
     // Log activities (best effort)

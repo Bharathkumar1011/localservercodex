@@ -61,7 +61,7 @@ createUser: async (userData: any, req: Request) => {
 
 const { data, error } = await supabaseAdmin.auth.admin.createUser({
   email: normalizedEmail,
-  email_confirm: true,
+  email_confirm: false,
   password: crypto.randomUUID().replace(/-/g, ""),  // Temporary password, never used
 });
 

@@ -131,6 +131,7 @@ export const leads = pgTable("leads", {
   stage: varchar("stage", { length: 20 }).notNull().default('universe'), // universe, qualified, outreach, pitching, mandates, won, lost, rejected
   universeStatus: varchar("universe_status", { length: 20 }).default('open'), // open, assigned - sub-states within universe
   ownerAnalystId: varchar("owner_analyst_id").references(() => users.id), // Analyst who owns/created this lead
+   createdBy: varchar("created_by").references(() => users.id).notNull(), // User who created this lead
   assignedTo: varchar("assigned_to").references(() => users.id), // Deprecated: Use assignedInterns instead
   assignedInterns: text("assigned_interns").array(), // Array of intern user IDs assigned to this lead
   pipelineValue: decimal("pipeline_value", { precision: 15, scale: 2 }),
@@ -210,6 +211,7 @@ export const interventions = pgTable("interventions", {
   scheduledAt: timestamp("scheduled_at").notNull(), // When intervention was scheduled/performed
   notes: text("notes"),
   documentName: varchar("document_name", { length: 100 }), // For document type: PDM, MTS, LOE (Letter of Engagement), Contract
+  status: varchar("status", { length: 20 }).notNull().default('pending'), // pending, completed
   createdAt: timestamp("created_at").defaultNow(),
 });
 
@@ -314,7 +316,8 @@ export const insertLeadSchema = createInsertSchema(leads).omit({
   organizationId: true, // Security: Server assigns organizationId, never client-controlled
   createdAt: true, 
   updatedAt: true, 
-  stageUpdatedAt: true 
+  stageUpdatedAt: true, 
+  createdBy: true, // ⭐ Server will set createdBy = current user
 });
 export const updateLeadSchema = insertLeadSchema.partial();
 export const insertLeadAssignmentSchema = createInsertSchema(leadAssignments).omit({ id: true, assignedAt: true });
@@ -364,10 +367,12 @@ export const individualLeadFormSchema = z.object({
 });
 
 // Intervention form schema for outreach stage
+// For manual form: we keep enum for type
 export const interventionFormSchema = insertInterventionSchema.extend({
-  type: z.enum(["linkedin_message", "call", "whatsapp", "email", "meeting"]),
+  type: z.enum(["linkedin_message", "call", "whatsapp", "email", "meeting", "document"]),
   scheduledAt: z.date(),
   notes: z.string().min(1, "Notes are required"),
+  status: z.enum(["pending", "completed"]).default("pending"),
 });
 
 // Deal outcome form schema for pitching stage
