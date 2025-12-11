@@ -231,7 +231,7 @@ const authMiddleware = requireSupabaseAuth;
     
     // Protected routes with role-based access
     app.use('/api/users', authMiddleware, requireRole(['partner', 'admin', 'analyst']), userRoutes);
-    app.use('/api/companies', authMiddleware, requireRole(['partner', 'admin']), companyRoutes);
+    app.use('/api/companies', authMiddleware, requireRole(['partner', 'admin','analyst']), companyRoutes);
     app.use('/api/leads', authMiddleware, leadRoutes); // Role checks moved to individual routes
     app.use('/api/contacts', authMiddleware, contactRoutes);
     
@@ -1077,7 +1077,7 @@ app.post(
     });
 
     // PATCH route for partial company updates (same as PUT for this API)
-    app.patch('/api/companies/:id', authMiddleware, requireRole(['partner', 'admin']), validateIntParam('id'), validateResourceExists('company'), async (req: any, res) => {
+    app.patch('/api/companies/:id', authMiddleware, requireRole(['partner', 'admin','analyst']), validateIntParam('id'), validateResourceExists('company'), async (req: any, res) => {
       try {
         const currentUser = req.verifiedUser;
         if (!currentUser || !currentUser.organizationId) {
@@ -2853,7 +2853,7 @@ app.post(
     });
 
     // Comprehensive audit logs route for admin/partner audit page
-    app.get('/api/activity-logs', authMiddleware, requireRole(['admin', 'partner']), async (req: any, res) => {
+    app.get('/api/activity-logs', authMiddleware, requireRole(['admin', 'partner','analyst']), async (req: any, res) => {
       try {
         const currentUser = req.verifiedUser || await storage.getUser(req.user?.claims?.sub);
         console.log('>>> Current user:', currentUser?.id, currentUser?.organizationId);
