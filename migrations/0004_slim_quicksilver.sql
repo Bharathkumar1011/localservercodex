@@ -1,0 +1,1 @@
+ALTER TABLE "interventions" ADD COLUMN "meeting_mode" varchar(20);

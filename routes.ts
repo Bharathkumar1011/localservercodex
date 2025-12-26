@@ -2634,7 +2634,8 @@ app.post(
           type: z.enum(["linkedin_message", "call", "whatsapp", "email", "meeting", "document"]),
           scheduledAt: z.string(), // Comes as string from datetime-local input
           notes: z.string().min(1, "Notes are required"),
-          documentName: z.string().optional() // For document type: PDM, MTS, LOE, Contract
+          documentName: z.string().optional(), // For document type: PDM, MTS, LOE, Contract
+          meetingMode: z.enum(["online", "inperson"]).optional(),
         });
         
         const validatedData = frontendSchema.parse(req.body);
@@ -2645,6 +2646,7 @@ app.post(
           scheduledAt: new Date(validatedData.scheduledAt), // Convert string to Date
           notes: validatedData.notes,
           documentName: validatedData.documentName,
+          meetingMode: validatedData.meetingMode, // add this
           organizationId: currentUser.organizationId,
           userId: currentUser.id
         });

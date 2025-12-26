@@ -220,5 +220,49 @@ if (linkError) {
       fromUser: { id: fromUser.id, name: `${fromUser.firstName} ${fromUser.lastName}` },
       toUser: { id: toUser.id, name: `${toUser.firstName} ${toUser.lastName}` }
     };
+  },
+
+transferOwnership: async (fromUserId: string, toUserId: string, req: any) => {
+    const currentUser = req.verifiedUser;
+
+    if (!currentUser?.organizationId) {
+      throw new Error('User not associated with an organization');
+    }
+
+    if (!fromUserId || !toUserId) {
+      throw new Error('fromUserId and toUserId are required');
+    }
+
+    if (fromUserId === toUserId) {
+      throw new Error('fromUserId and toUserId cannot be the same');
+    }
+
+    // ✅ verify users exist and belong to same org (recommended)
+    const fromUser = await storage.getUser(fromUserId);
+    const toUser = await storage.getUser(toUserId);
+
+    if (!fromUser) throw new Error('Source user not found');
+    if (!toUser) throw new Error('Target user not found');
+
+    if (fromUser.organizationId !== currentUser.organizationId) {
+      throw new Error('Source user is not in your organization');
+    }
+    if (toUser.organizationId !== currentUser.organizationId) {
+      throw new Error('Target user is not in your organization');
+    }
+
+    // ✅ IMPORTANT: ownership = ownerAnalystId
+    const result = await storage.transferLeadOwnership(
+      currentUser.organizationId,
+      fromUserId,
+      toUserId
+    );
+
+    return {
+      success: true,
+      transferredCount: result.transferredCount,
+      message: `Transferred ownership of ${result.transferredCount} leads`,
+    };
   }
+
 };

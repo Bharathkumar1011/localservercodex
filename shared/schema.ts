@@ -213,6 +213,7 @@ export const interventions = pgTable("interventions", {
   documentName: varchar("document_name", { length: 100 }), // For document type: PDM, MTS, LOE (Letter of Engagement), Contract
   status: varchar("status", { length: 20 }).notNull().default('pending'), // pending, completed
   createdAt: timestamp("created_at").defaultNow(),
+  meetingMode: varchar("meeting_mode", { length: 20 }), // NEW
 });
 
 // Activity log for comprehensive audit trail

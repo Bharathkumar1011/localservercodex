@@ -107,7 +107,8 @@ export interface IStorage {
   updateLead(id: number, organizationId: number, updates: Partial<UpsertLead>): Promise<Lead | undefined>;
   assignLead(leadId: number, organizationId: number, assignedTo: string | null, assignedBy: string, notes?: string): Promise<void>;
   assignInternsToLead(leadId: number, organizationId: number, internIds: string[], assignedBy: string, notes?: string): Promise<void>;
-  
+  transferLeadOwnership(organizationId: number, fromUserId: string, toUserId: string): Promise<{ transferredCount: number }>;
+
   // Assignment operations
   getLeadAssignments(leadId: number, organizationId: number): Promise<(LeadAssignment & { assignedByUser: User; assignedToUser: User })[]>;
   
@@ -1782,6 +1783,30 @@ async getLead(
       internsTransferred
     };
   }
+  
+    async transferLeadOwnership(
+    organizationId: number,
+    fromUserId: string,
+    toUserId: string
+  ): Promise<{ transferredCount: number }> {
+    // Update ONLY ownerAnalystId (ownership)
+    const updated = await db
+      .update(leads)
+      .set({
+        ownerAnalystId: toUserId,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(leads.organizationId, organizationId),
+          eq(leads.ownerAnalystId, fromUserId)
+        )
+      )
+      .returning({ id: leads.id });
+
+    return { transferredCount: updated.length };
+  }
+
 
   // Challenge token operations for secure reassignments
   async createChallengeToken(userId: string, organizationId: number, leadId: number, purpose: string): Promise<string> {
