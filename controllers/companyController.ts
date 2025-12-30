@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import { companyService } from '../services/companyService.js';
+import { parse } from "csv-parse/sync";
 
 export const companyController = {
   createCompany: async (req: Request, res: Response) => {

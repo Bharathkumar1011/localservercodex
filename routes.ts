@@ -21,6 +21,9 @@ import { contactRoutes } from './routes/contactRoutes.js';
 import { requireRole } from './middleware/auth.js';
 import { requireSupabaseAuth } from './middleware/supabaseAuth.js';
 
+import { parse } from "csv-parse/sync";
+
+
 import {
   insertCompanySchema,
   updateCompanySchema,
@@ -656,190 +659,259 @@ const authMiddleware = requireSupabaseAuth;
 
 
 app.post(
-  '/api/companies/csv-upload',
+  "/api/companies/csv-upload",
   authMiddleware,
-  requireRole(['partner', 'admin', 'analyst']),
+  requireRole(["partner", "admin", "analyst"]),
   async (req: any, res) => {
     try {
       const currentUser = req.verifiedUser;
       if (!currentUser || !currentUser.organizationId) {
-        return res.status(401).json({ message: 'User organization not found' });
+        return res.status(401).json({ message: "User organization not found" });
       }
 
       const { csvData } = req.body;
-      if (!csvData || typeof csvData !== 'string') {
-        return res.status(400).json({ message: 'CSV data is required' });
+      if (!csvData || typeof csvData !== "string") {
+        return res.status(400).json({ message: "CSV data is required" });
       }
-      console.log('========================================');  
-      console.log('Received CSV data for upload');
-      console.log('========================================');  
-
 
       const organizationId = currentUser.organizationId;
-      const lines = csvData.split('\n').filter((line) => line.trim());
-      if (lines.length < 2) {
-        return res
-          .status(400)
-          .json({ message: 'CSV must contain header row and at least one data row' });
+
+      // ✅ robust number parsing
+      function parseNumber(val: any): number | null {
+        if (val === null || val === undefined) return null;
+        const s = String(val).trim();
+        if (!s || s.toLowerCase() === "na" || s.toLowerCase() === "n/a") return null;
+        // remove currency symbols/commas
+        const cleaned = s.replace(/₹/g, "").replace(/,/g, "").trim();
+        const num = Number(cleaned);
+        return Number.isFinite(num) ? num : null;
       }
 
-      const headers = lines[0].split(',').map((h) => h.replace(/"/g, '').trim());
+      const rows = parse(csvData, {
+        columns: true,           // uses headers as keys
+        skip_empty_lines: true,
+        bom: true,               // handles BOM in CSVs from Excel/Sheets
+        relax_quotes: true,
+        relax_column_count: true // ignores extra columns
+      }) as Record<string, any>[];
+      console.log("[csv-upload] using csv-parse ✅ rows:", rows.length);
+
+      const nonEmptyRows = rows.filter((r) =>
+        Object.values(r || {}).some((v) => String(v ?? "").trim() !== "")
+      );
+
+      if (nonEmptyRows.length === 0) {
+        return res.status(400).json({ message: "CSV must contain at least one data row" });
+      }
+
+
+      // optional safety cap
+      const MAX_ROWS = 5000;
+      if (rows.length > MAX_ROWS) {
+        return res.status(400).json({ message: `Too many rows. Max allowed is ${MAX_ROWS}.` });
+      }
+
+      // ✅ preload users for assignment matching (once)
+      const orgUsers = await storage.getUsers(organizationId);
+      const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
+
+      const userByEmail = new Map<string, string>();
+      const userByName = new Map<string, string>();
+
+      for (const u of orgUsers) {
+        if (u.email) userByEmail.set(norm(u.email), u.id);
+        const full = norm(`${u.firstName || ""} ${u.lastName || ""}`.trim());
+        if (full) userByName.set(full, u.id);
+      }
+      
       const results = {
-        totalRows: lines.length - 1,
+        totalRows: rows.length,
         successfulCompanies: 0,
         successfulLeads: 0,
         successfulContacts: 0,
+        warnings: [] as Array<{ row: number; warning: string }>,
         errors: [] as Array<{ row: number; error: string }>,
       };
-      const createdCompanyIds: number[] = [];
 
-      // Process each data row
-      for (let i = 1; i < lines.length; i++) {
+      for (let i = 0; i < rows.length; i++) {
+        const rowNum = i + 2; // header is row 1
         try {
-          const values = lines[i].split(',').map((v) => v.replace(/"/g, '').trim());
-          if (values.length !== headers.length) {
-            results.errors.push({ row: i + 1, error: 'Column count mismatch' });
-            continue;
-          }
-          console.log('Processing CSV row:', i + 1, values);
+          const row = rows[i] || {};
 
-        const companyData = {
-  name: values[0] || '',
-  sector: values[1] || null,
-  subSector: values[2] || null,
-  location: values[3] || null,
-  foundedYear: parseNumber(values[4]),
-  businessDescription: values[5] || null,
-  products: values[6] || null,
-  website: values[7] || null,
-  industry: values[8] || null,
-  financialYear: values[9] || null,
-  revenueInrCr: parseNumber(values[10]),
-  ebitdaInrCr: parseNumber(values[11]),
-  patInrCr: parseNumber(values[12])
-};
-
-
-          if (!companyData.name) {
-            results.errors.push({ row: i + 1, error: 'Company name is required' });
-            continue;
-          }
-          if (!companyData.sector) {
-            results.errors.push({ row: i + 1, error: 'Sector is required' });
+          // ---- Company mapping by header name (extra columns ignored automatically)
+          const companyName = (row["Company Name"] ?? row["Company"] ?? row["Name"] ?? "").toString().trim();
+          if (!companyName) {
+            results.errors.push({ row: rowNum, error: "Company Name is required" });
             continue;
           }
 
-          // Create company with deduplication
-          const companyResult = await storage.createCompanyWithDeduplication(
-            companyData,
-            organizationId
-          );
-          const company = companyResult.company;
-          const isExisting = companyResult.isExisting;
-          if (!isExisting) {
-            results.successfulCompanies++;
-            createdCompanyIds.push(company.id);
-          }
-
-          // Determine universe status
-          const assignedTo =  null;
-          const universeStatus = assignedTo ? 'assigned' : 'open';
-          const ownerAnalystId =
-            currentUser.role === 'analyst' ? currentUser.id : null;
-
-          // Create lead for this company (same as individual route)
-          const lead = await storage.createLead({
-            organizationId,
-            companyId: Number(company.id),
-            stage: 'universe',
-            universeStatus,
-            ownerAnalystId,
-            assignedTo: assignedTo || null, 
-            pocCount: 0,
-            pocCompletionStatus: 'red',
-            pipelineValue: null,
-            probability: '0',
-            notes: null,
-            createdBy: currentUser.id,   // ⭐ REQUIRED
-          });
-          results.successfulLeads++;
-
-          // Activity logs (optional best-effort)
-          try {
-            if (!isExisting) {
-              await ActivityLogService.logCompanyCreated(
-                organizationId,
-                currentUser.id,
-                company.id,
-                company.name
-              );
-            }
-
-            await ActivityLogService.logLeadCreated(
-              organizationId,
-              currentUser.id,
-              lead.id,
-              company.id,
-              company.name,
-              'universe'
-            );
-
-            if (assignedTo) {
-              const assignedUser = await storage.getUser(assignedTo);
-              const assignedToName = assignedUser
-                ? `${assignedUser.firstName || ''} ${assignedUser.lastName || ''}`.trim() ||
-                  assignedUser.email
-                : undefined;
-
-              await ActivityLogService.logLeadAssigned(
-                organizationId,
-                currentUser.id,
-                lead.id,
-                company.id,
-                company.name,
-                assignedTo,
-                assignedToName
-              );
-            }
-          } catch (logError) {
-            console.error('Error logging activity for CSV row:', i + 1, logError);
-          }
-
-          // Extract and create contact
-          const contactData = {
-            organizationId,
-            companyId: company.id,
-            name: values[13] || null,
-            designation: values[14] || null,
-            email: values[15] || null,
-            phone: values[16] || null,
-            linkedinProfile: values[17] || null,
-            isPrimary: true,
+          const companyData: any = {
+            name: companyName,
+            sector: (row["Sector"] ?? null)?.toString().trim() || null,
+            subSector: (row["Sub-Sector"] ?? row["Sub Sector"] ?? null)?.toString().trim() || null,
+            location: (row["City"] ?? row["Location"] ?? null)?.toString().trim() || null,
+            // FY fields (based on your CSV)
+            financialYear: "FY24",
+            revenueInrCr: parseNumber(row["FY24 Revenue (INR Cr)"]),
+            ebitdaInrCr: parseNumber(row["FY24 EBITDA (INR Cr)"]),
+            patInrCr: parseNumber(row["FY24 PAT (INR Cr)"]),
+            // not present in your CSV, keep null
+            foundedYear: null,
+            businessDescription: null,
+            products: null,
+            website: null,
+            industry: null,
           };
 
-          if (contactData.name || contactData.email || contactData.phone) {
-            await storage.createContact(contactData);
-            results.successfulContacts++;
+          // ✅ Create company with dedupe
+          const companyResult = await storage.createCompanyWithDeduplication(companyData, organizationId);
+          const company = companyResult.company;
+          const isExisting = companyResult.isExisting;
+
+          if (!isExisting) results.successfulCompanies++;
+
+          // ---- Assignment from CSV ("Analyst PoC SFCA")
+          let assignedTo: string | null = null;
+          const analystCell = (row["Analyst PoC SFCA"] ?? "").toString().trim();
+          if (analystCell && analystCell.toLowerCase() !== "na" && analystCell.toLowerCase() !== "n/a") {
+            const asEmail = norm(analystCell);
+            const asName = norm(analystCell);
+
+            assignedTo = userByEmail.get(asEmail) || userByName.get(asName) || null;
+
+            if (!assignedTo) {
+              results.warnings.push({
+                row: rowNum,
+                warning: `Assignee not found in CRM users: "${analystCell}". Lead left unassigned.`,
+              });
+            }
           }
+
+          // ---- Lead: create only if it doesn't exist for this company in this org
+          const existingLeads = await storage.getLeadsByCompany(company.id, organizationId);
+          let leadId: number | null = null;
+
+          if (!existingLeads || existingLeads.length === 0) {
+            const universeStatus = assignedTo ? "assigned" : "open";
+
+            const lead = await storage.createLead({
+              organizationId,
+              companyId: Number(company.id),
+              stage: "universe",
+              universeStatus,
+              ownerAnalystId: assignedTo || (currentUser.role === "analyst" ? currentUser.id : null),
+              assignedTo: assignedTo,
+              pocCount: 0,
+              pocCompletionStatus: "red",
+              pipelineValue: null,
+              probability: "0",
+              notes: null,
+              createdBy: currentUser.id,
+            });
+
+            leadId = lead.id;
+            results.successfulLeads++;
+          } else {
+            // Optional: if universe lead exists and is unassigned, assign it now
+            const lead = existingLeads[0];
+            leadId = lead.id;
+
+            if (assignedTo && !lead.assignedTo && lead.stage === "universe") {
+              await storage.assignLead(
+                lead.id,
+                organizationId,
+                assignedTo,
+                currentUser.id,
+                "Assigned from CSV upload"
+              );
+            }
+          }
+
+          // ---- Contacts: up to 2 from your file (POC 1 primary, POC 2 secondary)
+          const existingContacts = await storage.getContactsByCompany(company.id, organizationId);
+
+          const upsertContact = async (
+            incoming: any,
+            isPrimary: boolean
+          ) => {
+            const hasAny =
+              incoming.name || incoming.email || incoming.phone || incoming.linkedinProfile || incoming.designation;
+
+            if (!hasAny) return;
+
+            // find match: primary uses isPrimary, secondary uses email/phone match
+            let match = null as any;
+
+            if (isPrimary) {
+              match = existingContacts.find((c: any) => c.isPrimary);
+            } else {
+              const emailKey = incoming.email ? norm(incoming.email) : null;
+              const phoneKey = incoming.phone ? incoming.phone.toString().trim() : null;
+
+              match = existingContacts.find((c: any) => {
+                const cEmail = c.email ? norm(c.email) : null;
+                const cPhone = c.phone ? c.phone.toString().trim() : null;
+                return (emailKey && cEmail === emailKey) || (phoneKey && cPhone === phoneKey);
+              });
+            }
+
+            // update only with non-empty values
+            const patch: any = {};
+            for (const k of ["name", "designation", "email", "phone", "linkedinProfile"] as const) {
+              if (incoming[k]) patch[k] = incoming[k];
+            }
+            patch.isPrimary = isPrimary;
+
+            if (match) {
+              await storage.updateContact(match.id, patch);
+              // not counted as "created"
+            } else {
+              await storage.createContact({
+                organizationId,
+                companyId: company.id,
+                ...patch,
+                isPrimary,
+              });
+              results.successfulContacts++;
+            }
+          };
+
+          const poc1 = {
+            name: (row["POC 1 Name"] ?? "").toString().trim() || null,
+            designation: (row["POC 1 Designation"] ?? "").toString().trim() || null,
+            email: (row["POC 1 Email"] ?? "").toString().trim() || null,
+            phone: (row["POC 1 Phone Number"] ?? "").toString().trim() || null,
+            linkedinProfile: (row["POC 1 Linkedin"] ?? "").toString().trim() || null,
+          };
+
+          const poc2 = {
+            name: (row["POC Name 2"] ?? row["POC 2 Name"] ?? "").toString().trim() || null,
+            designation: (row["POC Designation 2"] ?? row["POC 2 Designation"] ?? "").toString().trim() || null,
+            email: (row["POC Email 2"] ?? row["POC 2 Email"] ?? "").toString().trim() || null,
+            phone: (row["POC Phone Number 2"] ?? row["POC 2 Phone Number"] ?? "").toString().trim() || null,
+            linkedinProfile: (row["POC Linkedin 2"] ?? row["POC 2 Linkedin"] ?? "").toString().trim() || null,
+          };
+
+          await upsertContact(poc1, true);
+          await upsertContact(poc2, false);
+
         } catch (error: any) {
-          console.error('Row processing error:', error);
           results.errors.push({
-            row: i + 1,
-            error: error.message || 'Failed to process row',
+            row: rowNum,
+            error: error?.message || "Failed to process row",
           });
         }
       }
+      console.log("[csv-upload] using csv-parse ✅");
 
-      res.json({
+      return res.json({
         success: true,
         message: `Upload completed: ${results.successfulCompanies} companies, ${results.successfulLeads} leads, ${results.successfulContacts} contacts`,
-        results: { ...results, createdCompanyIds },
+        results,
       });
     } catch (error: any) {
-      console.error('Error processing CSV upload:', error);
-      res
-        .status(500)
-        .json({ message: error.message || 'Failed to process CSV upload' });
+      console.error("Error processing CSV upload:", error);
+      return res.status(500).json({ message: error.message || "Failed to process CSV upload" });
     }
   }
 );
@@ -1933,7 +2005,7 @@ app.post(
           return res.status(404).json({ message: 'Assigned user not found' });
         }
 
-        if (assignedUser.organizationId !== organizationId) {
+        if (Number(assignedUser.organizationId) !== Number(organizationId)) {
           return res.status(403).json({ message: 'Cannot assign leads to users outside your organization' });
         }
 

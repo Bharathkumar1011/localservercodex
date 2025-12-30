@@ -441,7 +441,11 @@ export const leadService = {
   bulkAssignLeads: async (assignmentData: any, req: Request) => {
     const { leadIds, assignedTo } = assignmentData;
     const assignedBy = (req as any).user?.claims?.sub;
-    const organizationId = (req as any).user?.organizationId;
+    const organizationId = (req as any).verifiedUser?.organizationId;
+
+    if (!organizationId) {
+      throw new Error('User organization not found');
+    }
 
     if (!leadIds || !Array.isArray(leadIds) || leadIds.length === 0) {
       throw new Error('Lead IDs array is required');
@@ -457,7 +461,7 @@ export const leadService = {
       throw new Error('Assigned user not found');
     }
 
-    if (assignedUser.organizationId !== organizationId) {
+    if (Number(assignedUser.organizationId) !== Number(organizationId)) {
       throw new Error('Cannot assign leads to users outside your organization');
     }
 
