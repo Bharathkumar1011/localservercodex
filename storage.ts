@@ -135,7 +135,7 @@ export interface IStorage {
   getActivityLog(organizationId: number, leadId?: number, companyId?: number, limit?: number): Promise<(ActivityLog & { user: User })[]>;
   getActivityLogsForAudit(organizationId: number, filters: {
     search?: string;
-    userId?: number;
+    userId?: string;
     companyId?: number;
     action?: string;
     startDate?: Date;
@@ -1105,7 +1105,7 @@ async getLead(
 
   async getActivityLogsForAudit(organizationId: number, filters: {
     search?: string;
-    userId?: number;
+    userId?: string;
     companyId?: number;
     action?: string;
     startDate?: Date;

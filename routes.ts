@@ -2990,18 +2990,19 @@ app.post(
         if (!currentUser || !currentUser.organizationId) {
           return res.status(401).json({ message: 'User organization not found' });
         }
-        
+        const endDate = req.query.endDate ? new Date(String(req.query.endDate)) : undefined;
+        if (endDate) endDate.setHours(23, 59, 59, 999);
         // Parse filters from query parameters
         const filters = {
-          search: req.query.search as string,
-          userId: req.query.user ? parseInt(req.query.user) : undefined,
-          companyId: req.query.company ? parseInt(req.query.company) : undefined,
-          action: req.query.action as string,
-          startDate: req.query.startDate ? new Date(req.query.startDate) : undefined,
-          endDate: req.query.endDate ? new Date(req.query.endDate) : undefined,
-          page: req.query.page ? parseInt(req.query.page) : 1,
-          limit: req.query.limit ? parseInt(req.query.limit) : 50
-        };
+        search: req.query.search as string,
+        userId: req.query.user ? String(req.query.user) : undefined,
+        companyId: req.query.company ? parseInt(String(req.query.company)) : undefined,
+        action: req.query.action as string,
+        startDate: req.query.startDate ? new Date(String(req.query.startDate)) : undefined,
+        endDate,
+        page: req.query.page ? parseInt(String(req.query.page)) : 1,
+        limit: req.query.limit ? parseInt(String(req.query.limit)) : 50
+      };
         
         const result = await storage.getActivityLogsForAudit(currentUser.organizationId, filters);
         res.json(result);
