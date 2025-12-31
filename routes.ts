@@ -736,7 +736,12 @@ app.post(
       for (let i = 0; i < rows.length; i++) {
         const rowNum = i + 2; // header is row 1
         try {
-          const row = rows[i] || {};
+          const rowRaw = rows[i] || {};
+
+          // ✅ Normalize headers (trim, collapse spaces, remove \n)
+          const row = Object.fromEntries(
+            Object.entries(rowRaw).map(([k, v]) => [String(k).replace(/\s+/g, " ").trim(), v])
+          ) as Record<string, any>;
 
           // ---- Company mapping by header name (extra columns ignored automatically)
           const companyName = (row["Company Name"] ?? row["Company"] ?? row["Name"] ?? "").toString().trim();
@@ -863,8 +868,7 @@ app.post(
             patch.isPrimary = isPrimary;
 
             if (match) {
-              await storage.updateContact(match.id, patch);
-              // not counted as "created"
+              await storage.updateContact(match.id, organizationId, patch);  // update existing changed contact
             } else {
               await storage.createContact({
                 organizationId,
@@ -877,20 +881,20 @@ app.post(
           };
 
           const poc1 = {
-            name: (row["POC 1 Name"] ?? "").toString().trim() || null,
-            designation: (row["POC 1 Designation"] ?? "").toString().trim() || null,
-            email: (row["POC 1 Email"] ?? "").toString().trim() || null,
-            phone: (row["POC 1 Phone Number"] ?? "").toString().trim() || null,
-            linkedinProfile: (row["POC 1 Linkedin"] ?? "").toString().trim() || null,
-          };
+          name: (row["POC 1 Name"] ?? "").toString().trim() || null,
+          designation: (row["POC 1 Designation"] ?? "").toString().trim() || null, // if not present, stays null
+          email: (row["Email ID 1"] ?? row["Primary Contact Email"] ?? "").toString().trim() || null,
+          phone: (row["Phone Number 1"] ?? row["Primary Contact Phone"] ?? "").toString().trim() || null,
+          linkedinProfile: (row["LinkedIn 1"] ?? row["Primary Contact LinkedIn"] ?? "").toString().trim() || null,
+        };
 
-          const poc2 = {
-            name: (row["POC Name 2"] ?? row["POC 2 Name"] ?? "").toString().trim() || null,
-            designation: (row["POC Designation 2"] ?? row["POC 2 Designation"] ?? "").toString().trim() || null,
-            email: (row["POC Email 2"] ?? row["POC 2 Email"] ?? "").toString().trim() || null,
-            phone: (row["POC Phone Number 2"] ?? row["POC 2 Phone Number"] ?? "").toString().trim() || null,
-            linkedinProfile: (row["POC Linkedin 2"] ?? row["POC 2 Linkedin"] ?? "").toString().trim() || null,
-          };
+        const poc2 = {
+          name: (row["POC Name 2"] ?? row["POC 2 Name"] ?? "").toString().trim() || null,
+          designation: (row["POC 2 Designation"] ?? "").toString().trim() || null,
+          email: (row["Email ID 2"] ?? "").toString().trim() || null,
+          phone: (row["POC 2 Number"] ?? row["Phone Number 2"] ?? "").toString().trim() || null,
+          linkedinProfile: (row["LinkedIn 2"] ?? "").toString().trim() || null,
+        };
 
           await upsertContact(poc1, true);
           await upsertContact(poc2, false);
@@ -1985,53 +1989,104 @@ app.post(
     });
 
     // Bulk assign leads route
-    app.post('/api/leads/bulk-assign', authMiddleware, requireRole(['partner', 'admin']), async (req: any, res) => {
-      try {
-        const { leadIds, assignedTo } = req.body;
-        const assignedBy = req.verifiedUser.id;
-        const organizationId = req.verifiedUser.organizationId;
+     app.post(
+      "/api/leads/bulk-assign",
+      authMiddleware,
+      requireRole(["partner", "admin"]),
+      async (req: any, res) => {
+        try {
+          const { leadIds, assignedTo } = req.body;
+          const assignedBy = req.verifiedUser.id;
+          const organizationId = req.verifiedUser.organizationId;
 
-        if (!leadIds || !Array.isArray(leadIds) || leadIds.length === 0) {
-          return res.status(400).json({ message: 'Lead IDs array is required' });
-        }
-
-        if (!assignedTo) {
-          return res.status(400).json({ message: 'Assigned user is required' });
-        }
-
-        // Verify the user being assigned to exists and belongs to the same organization
-        const assignedUser = await storage.getUser(assignedTo);
-        if (!assignedUser) {
-          return res.status(404).json({ message: 'Assigned user not found' });
-        }
-
-        if (Number(assignedUser.organizationId) !== Number(organizationId)) {
-          return res.status(403).json({ message: 'Cannot assign leads to users outside your organization' });
-        }
-
-        // Verify all leads exist and belong to the organization
-        for (const leadId of leadIds) {
-          const lead = await storage.getLead(leadId, organizationId);
-          if (!lead) {
-            return res.status(404).json({ message: `Lead ${leadId} not found` });
+          if (!leadIds || !Array.isArray(leadIds) || leadIds.length === 0) {
+            return res.status(400).json({ message: "Lead IDs array is required" });
           }
-        }
 
-        // Perform bulk assignment by calling assignLead for each lead
-        for (const leadId of leadIds) {
-          await storage.assignLead(leadId, organizationId, assignedTo, assignedBy, `Bulk assignment`);
-        }
+          if (!assignedTo) {
+            return res.status(400).json({ message: "Assigned user is required" });
+          }
+          // ✅ Normalize leadIds to numbers (front-end often sends strings)
+          const leadIdsNum = leadIds
+            .map((id: any) => Number(id))
+            .filter((n: number) => Number.isFinite(n));
 
-        res.json({ 
-          success: true, 
-          message: `Successfully assigned ${leadIds.length} leads to ${assignedUser.firstName} ${assignedUser.lastName}`,
-          assignedCount: leadIds.length 
-        });
-      } catch (error) {
-        console.error('Error bulk assigning leads:', error);
-        res.status(400).json({ message: 'Failed to bulk assign leads', error: error instanceof Error ? error.message : 'Unknown error' });
+          if (leadIdsNum.length !== leadIds.length) {
+            return res.status(400).json({ message: "Invalid leadIds: must be numbers" });
+          }
+
+          // Verify the user being assigned to exists and belongs to the same organization
+          const assignedUser = await storage.getUser(assignedTo);
+          if (!assignedUser) {
+            return res.status(404).json({ message: "Assigned user not found" });
+          }
+
+          if (Number(assignedUser.organizationId) !== Number(organizationId)) {
+            return res
+              .status(403)
+              .json({ message: "Cannot assign leads to users outside your organization" });
+          }
+
+          // Verify all leads exist and belong to the organization
+          for (const leadId of leadIdsNum) {
+            const lead = await storage.getLead(leadId, organizationId);
+            if (!lead) {
+              return res.status(404).json({ message: `Lead ${leadId} not found` });
+            }
+          }
+
+          // Perform bulk assignment + auto move Universe -> Qualified when assigned to analyst
+          let autoQualifiedCount = 0;
+
+          for (const leadId of leadIdsNum) {
+            // 1) Assign
+            await storage.assignLead(leadId, organizationId, assignedTo, assignedBy, "Bulk assignment");
+
+            // 2) Trigger stage logic
+            try {
+              await stageProgressionService.autoProgressLead(leadId, organizationId);
+            } catch (e) {
+              console.error(`Auto-progression failed for lead ${leadId}:`, e);
+            }
+
+            // 3) SAFETY fallback: force Universe -> Qualified if assigned to analyst
+            // 3) SAFETY fallback: force Universe -> Qualified if assigned to analyst
+            const updatedLead = await storage.getLead(leadId, organizationId);
+            if (updatedLead && updatedLead.stage === "universe" && assignedUser.role === "analyst") {
+              await storage.updateLead(leadId, organizationId, { stage: "qualified" });
+            }
+
+            // ✅ Count after everything (so it works whether stage changed in assignLead OR fallback)
+            const finalLead = await storage.getLead(leadId, organizationId);
+            if (finalLead?.stage === "qualified" && assignedUser.role === "analyst") {
+              autoQualifiedCount++;
+            }
+
+          }
+
+            // OPTIONAL (only if you want the same “normal flow” checks)
+            // try {
+            //   await stageProgressionService.autoProgressLead(leadId, organizationId);
+            // } catch (e) {
+            //   console.log(`Auto-progression failed for lead ${leadId}:`, e);
+            // }
+          
+
+          return res.json({
+            success: true,
+            message: `Successfully assigned ${leadIds.length} leads to ${assignedUser.firstName} ${assignedUser.lastName}`,
+            assignedCount: leadIds.length,
+            autoQualifiedCount,
+          });
+        } catch (error) {
+          console.error("Error bulk assigning leads:", error);
+          return res.status(400).json({
+            message: "Failed to bulk assign leads",
+            error: error instanceof Error ? error.message : "Unknown error",
+          });
+        }
       }
-    });
+    );
 
 
 

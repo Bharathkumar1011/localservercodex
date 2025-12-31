@@ -866,8 +866,15 @@ async getLead(
       
       if (assignee && assignee.role === 'analyst') {
         updateData.ownerAnalystId = assignedTo;
+
+
+        // ✅ AUTO MOVE: Universe -> Qualified when assigned to analyst
+        if (currentLead.stage === 'universe') {
+          updateData.stage = 'qualified';
+          updateData.stageUpdatedAt = new Date();
       }
     }
+  }
     
     // Update the lead assignment and universe status
     await db
