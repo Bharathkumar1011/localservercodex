@@ -511,7 +511,10 @@ async getActionablesByLead(leadId: number, organizationId: number) {
   // Contact operations
   async createContact(contactData: UpsertContact): Promise<Contact> {
     // Check if all mandatory fields are present to set isComplete
-    const isComplete = !!(contactData.name && contactData.designation && contactData.linkedinProfile);
+    const isComplete = !!(
+      contactData.name && contactData.name.trim() &&
+      contactData.designation && contactData.designation.trim()
+    );
     const [contact] = await db
       .insert(contacts)
       .values({ ...contactData, isComplete })
@@ -534,7 +537,10 @@ async getActionablesByLead(leadId: number, organizationId: number) {
     if (!current) return undefined;
     
     const updatedData = { ...current, ...updates };
-    const isComplete = !!(updatedData.name && updatedData.designation && updatedData.linkedinProfile);
+    const isComplete = !!(
+      updatedData.name && String(updatedData.name).trim() &&
+      updatedData.designation && String(updatedData.designation).trim()
+    );
     
     const [contact] = await db
       .update(contacts)

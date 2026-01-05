@@ -24,7 +24,9 @@ export const contactService = {
           
           let pocCompletionStatus = 'red';
           if (pocCount > 0) {
-            const completeContacts = companyContacts.filter(c => c.isComplete);
+            const completeContacts = companyContacts.filter(
+              (c: any) => !!(c.name && c.name.trim() && c.designation && c.designation.trim())
+            );
             if (completeContacts.length >= 1) {
               pocCompletionStatus = pocCount >= 3 ? 'green' : 'amber';
             }
@@ -38,10 +40,11 @@ export const contactService = {
           // Auto-qualify lead if primary contact has Name + Designation + LinkedIn URL
           if (lead.stage === 'universe') {
             const primaryContact = companyContacts.find(c => c.isPrimary);
-            if (primaryContact && 
-                primaryContact.name && 
-                primaryContact.designation && 
-                primaryContact.linkedinProfile) {
+            if (
+              primaryContact &&
+              primaryContact.name && primaryContact.name.trim() &&
+              primaryContact.designation && primaryContact.designation.trim()
+            ) {
               await storage.updateLead(lead.id, currentUser.organizationId, {
                 // stage: 'qualified'
                 stage: 'outreach'
@@ -96,7 +99,9 @@ export const contactService = {
           
           let pocCompletionStatus = 'red';
           if (pocCount > 0) {
-            const completeContacts = companyContacts.filter(c => c.isComplete);
+            const completeContacts = companyContacts.filter(
+              (c: any) => !!(c.name && c.name.trim() && c.designation && c.designation.trim())
+            );
             if (completeContacts.length >= 1) {
               pocCompletionStatus = pocCount >= 3 ? 'green' : 'amber';
             }
@@ -110,10 +115,11 @@ export const contactService = {
           // Auto-qualify lead if primary contact has Name + Designation + LinkedIn URL
           if (lead.stage === 'universe') {
             const primaryContact = companyContacts.find(c => c.isPrimary);
-            if (primaryContact && 
-                primaryContact.name && 
-                primaryContact.designation && 
-                primaryContact.linkedinProfile) {
+            if (
+              primaryContact &&
+              primaryContact.name && primaryContact.name.trim() &&
+              primaryContact.designation && primaryContact.designation.trim()
+            ) {
               await storage.updateLead(lead.id, currentUser.organizationId, {
                 // stage: 'qualified'
                 stage: 'outreach'
@@ -165,7 +171,9 @@ export const contactService = {
         
         let pocCompletionStatus = 'red';
         if (pocCount > 0) {
-          const completeContacts = companyContacts.filter(c => c.isComplete);
+          const completeContacts = companyContacts.filter(
+            (c: any) => !!(c.name && c.name.trim() && c.designation && c.designation.trim())
+          );
           if (completeContacts.length >= 1) {
             pocCompletionStatus = pocCount >= 3 ? 'green' : 'amber';
           }

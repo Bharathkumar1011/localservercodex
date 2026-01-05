@@ -350,8 +350,21 @@ export const insertDealOutcomeSchema = createInsertSchema(dealOutcomes).omit({
 export const contactFormSchema = insertContactSchema.extend({
   name: z.string().min(1, "Name is required"),
   designation: z.string().min(1, "Designation is required"),
-  linkedinProfile: z.string().url("LinkedIn profile must be a valid URL").min(1, "LinkedIn profile is required")
+
+  // ✅ LinkedIn is OPTIONAL now
+  linkedinProfile: z
+    .string()
+    .optional()
+    .nullable()
+    .transform((v) => {
+      const s = (v ?? "").toString().trim();
+      return s.length ? s : null; // empty string -> null
+    })
+    .refine((v) => !v || v.includes("linkedin.com"), {
+      message: "Please enter a valid LinkedIn URL",
+    }),
 });
+
 
 // Individual lead creation form schema
 export const individualLeadFormSchema = z.object({

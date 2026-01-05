@@ -22,6 +22,40 @@ import { requireRole } from './middleware/auth.js';
 import { requireSupabaseAuth } from './middleware/supabaseAuth.js';
 
 import { parse } from "csv-parse/sync";
+import multer from "multer";
+import { createRequire } from "module";
+const require = createRequire(import.meta.url);
+
+const pdfParsePkg: any = require("pdf-parse");
+
+// v2+ exports { PDFParse }, v1 exported a function
+const PDFParseClass: any =
+  pdfParsePkg?.PDFParse ??
+  pdfParsePkg?.default?.PDFParse ??
+  null;
+
+async function extractPdfText(buffer: Buffer): Promise<string> {
+  // ✅ v1 compatibility: const pdf = require("pdf-parse"); await pdf(buffer)
+  if (typeof pdfParsePkg === "function") {
+    const r = await pdfParsePkg(buffer);
+    return r?.text || "";
+  }
+
+  // ✅ v2+: const { PDFParse } = require("pdf-parse"); new PDFParse({ data: buffer })
+  if (typeof PDFParseClass === "function") {
+    const parser = new PDFParseClass({ data: buffer });
+    const r = await parser.getText();
+    if (typeof parser.destroy === "function") await parser.destroy();
+    return r?.text || "";
+  }
+
+  throw new Error("pdf-parse export not supported (expected function or PDFParse class)");
+}
+
+
+
+
+
 
 
 import {
@@ -651,11 +685,386 @@ const authMiddleware = requireSupabaseAuth;
     });
 
 
+  const tracxnUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 15 * 1024 * 1024 }, // 15 MB
+});
+
+function cleanStr(s: string) {
+  return (s || "")
+    .replace(/[]/g, "")                 // remove Tracxn icon chars
+    .replace(/Pro\u0000t/gi, "Profit")    // ✅ fix ligature: Pro\u0000t => Profit
+    .replace(/\u0000/g, "")               // remove remaining null chars
+    .replace(/[\uf0d8\uf0e8]/g, "")       // optional: remove Tracxn arrow icons
+    .replace(/[ \t]+/g, " ")
+    .trim();
+}
+
+function pickCrNumbers(line: string): number[] {
+  const matches = [...line.matchAll(/(\(?-?\d[\d,]*(?:\.\d+)?\)?)\s*Cr/gi)];
+  const nums = matches.map(m => {
+    let s = m[1].replace(/,/g, "");
+    const isParen = s.startsWith("(") && s.endsWith(")");
+    s = s.replace(/[()]/g, "");
+    const n = parseFloat(s);
+    return isParen ? -n : n;
+  });
+  return nums.filter(n => Number.isFinite(n));
+}
+
+function pickFirstCrNumber(line: string): number | null {
+  const nums = pickCrNumbers(line);
+  return nums.length ? nums[0] : null;     // ✅ FY24 (latest) is first
+}
+
+function pickLastCrNumber(line: string): number | null {
+  const nums = pickCrNumbers(line);
+  return nums.length ? nums[nums.length - 1] : null;
+}
+
+
+function pickBestLineWithCr(text: string, labelRegex: RegExp): string {
+  const lines = text.split(/\r?\n/).map(l => cleanStr(l)).filter(Boolean);
+  const matches = lines.filter(l => labelRegex.test(l));
+  if (!matches.length) return "";
+  // Prefer the INR (Cr) line, not the USD "Net Profit: 12.3M..." line
+  const withCr = matches.find(l => /\bCr\b/i.test(l));
+  return withCr || matches[0];
+}
+
+function pickFirstCrAfterLabel(text: string, labelRegex: RegExp, lookahead = 20): number | null {
+  const lines = text.split(/\r?\n/).map(l => cleanStr(l)).filter(Boolean);
+
+  for (let i = 0; i < lines.length; i++) {
+    if (!labelRegex.test(lines[i])) continue;
+
+    // 1) same line
+    const same = pickFirstCrNumber(lines[i]);
+    if (same !== null) return same;
+
+    // 2) scan next N lines (Tracxn tables often print values on following lines)
+    for (let j = i + 1; j < Math.min(lines.length, i + 1 + lookahead); j++) {
+      const v = pickFirstCrNumber(lines[j]);
+      if (v !== null) return v;
+      // stop early if we hit another section header
+      if (/^(Income Statement|Balance Sheet|Cash Flow|Key Metrics|Founder|Primary Legal Entity)/i.test(lines[j])) break;
+    }
+  }
+
+  return null;
+}
+
+
+function pickEmail(text: string): string | null {
+  const m = text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+  return m ? m[0] : null;
+}
+
+function pickPhone(text: string): string | null {
+  // Loose phone match; filters by digit count
+  const m = text.match(/(\+?\d[\d\s().-]{8,}\d)/);
+  if (!m) return null;
+
+  const raw = cleanStr(m[1]);
+  const digits = raw.replace(/\D/g, "");
+  if (digits.length < 10) return null;
+
+  return raw;
+}
+
+function pickKeyPersons(text: string): string | null {
+  const lines = text.split(/\r?\n/).map(l => cleanStr(l)).filter(Boolean);
+
+  const startIdx = lines.findIndex(l => /^Founder\s*&\s*Key\s*People/i.test(l));
+  if (startIdx < 0) return null;
+
+  const out: string[] = [];
+
+  for (let i = startIdx + 1; i < Math.min(lines.length, startIdx + 30); i++) {
+    const l = lines[i];
+
+    if (/^Primary Legal Entity/i.test(l)) break;
+    if (/^Name\s+Designation/i.test(l)) continue;
+    if (!l || l === "-") continue;
+
+    // Try to convert: "B V Hegde ex-Co-Founder -" -> "B V Hegde – ex-Co-Founder"
+    const mm = l.match(/^(.+?)\s+(ex-?co-founder|co-founder|founder|ceo|cfo|cto|coo|managing director|md|director|partner|chairman)\b/i);
+    if (mm) {
+      out.push(`${cleanStr(mm[1])} – ${cleanStr(mm[2])}`);
+      continue;
+    }
+
+    // fallback: keep line if it's short and looks like a person entry
+    if (l.length <= 80 && /[A-Za-z]/.test(l) && !/Description$/i.test(l)) {
+      out.push(l);
+    }
+  }
+
+  const uniq = Array.from(new Set(out)).filter(Boolean);
+  return uniq.length ? uniq.join(", ") : null;
+}
+
+function pickAnnualRevenueCr(text: string): number | null {
+  const m = text.match(/Annual Revenue\s*₹\s*([\d.,]+)\s*Cr/i);
+  if (!m) return null;
+  const num = parseFloat(m[1].replace(/,/g, ""));
+  return Number.isFinite(num) ? num : null;
+}
+
+function pickWebsite(text: string): string | null {
+  // tries to catch a domain or URL near "Website"
+  const m =
+    text.match(/Website\s*(https?:\/\/[^\s]+|\b[a-z0-9.-]+\.[a-z]{2,}\b)/i) ||
+    text.match(/www\.[a-z0-9.-]+\.[a-z]{2,}/i);
+  if (!m) return null;
+
+  const raw = m[1] || m[0];
+  const site = raw.startsWith("http") ? raw : `https://${raw}`;
+  return site;
+}
+
+function pickLocationCity(text: string): string | null {
+  const t = cleanStr(text);
+
+  // Most common: "1996|Mumbai (India)|Unfunded..." OR "1996 | Mumbai (India) | Unfunded..."
+  let m = t.match(/\b(19|20)\d{2}\b\s*\|\s*([^|]+?)\s*\|/);
+  if (m?.[2]) {
+    const loc = cleanStr(m[2]);
+    return cleanStr(loc.split("(")[0]); // "Mumbai (India)" -> "Mumbai"
+  }
+
+  // Fallback: "1996 Mumbai (India) Unfunded"
+  m = t.match(/\b(19|20)\d{2}\b\s+([A-Za-z][A-Za-z .&-]+?)\s*\(India\)/);
+  if (m?.[2]) {
+    return cleanStr(m[2]);
+  }
+
+  return null;
+}
+
+
+function pickCompanyName(text: string): string | null {
+  const lines = text.split(/\r?\n/).map(l => cleanStr(l)).filter(Boolean);
+  if (!lines.length) return null;
+  return lines[0];
+}
+
+function pickBusinessDescription(text: string): string | null {
+  const lines = text.split(/\r?\n/).map(l => cleanStr(l)).filter(Boolean);
+  if (!lines.length) return null;
+
+  const noise = /(Tracxn Score|Annual Revenue|Employee Count|Similar Companies|Website Screenshot|Income Statement|Balance Sheet|Financial Statement|News on|Key Metrics|Sectors|Company Details|Associated Legal Entities|Coverage Areas)/i;
+
+  // Prefer a clean descriptive line like "Manufacturer of ...", "Provider of ...", etc.
+  const descKeyword = /(manufacturer|provider|developer|operator|supplier|distributor|platform|saas|hospital|clinic|diagnostic)/i;
+
+  for (let i = 0; i < Math.min(lines.length, 40); i++) {
+    const l = lines[i];
+    if (noise.test(l)) continue;
+    if (/^\b(19|20)\d{2}\b\s*\|/i.test(l)) continue; // founded|city|...
+    if (/^https?:\/\//i.test(l)) continue;
+    if (descKeyword.test(l)) {
+      // Cut off any accidental trailing junk on the same line
+      let out = l;
+
+      const cutAt = [
+        /\b(19|20)\d{2}\b\s*\|/i,
+        /\bTracxn Score\b/i,
+        /\bAnnual Revenue\b/i,
+        /\bEmployee Count\b/i,
+      ];
+
+      for (const p of cutAt) {
+        const idx = out.search(p);
+        if (idx >= 0) out = out.slice(0, idx);
+      }
+
+      out = cleanStr(out);
+      if (out.length >= 10 && out.length <= 180) return out;
+    }
+  }
+
+  return null;
+}
+
+
+function pickSectorPath(text: string): string | null {
+  const lines = text.split(/\r?\n/).map(l => cleanStr(l)).filter(Boolean);
+
+  // 1) Best case: any line like "A > B > C" (Tracxn sector breadcrumb)
+  const direct = lines.find(l =>
+    /[>›»→]/.test(l) &&
+    !/^https?:\/\//i.test(l) &&
+    !/^(Sectors?|Company Details|Associated Legal Entities|Coverage Areas)/i.test(l) &&
+    l.length <= 220
+  );
+
+  if (direct) {
+    return cleanStr(direct.replace(/^[^A-Za-z0-9]+/, "")); // strip leading icons like 
+  }
+
+  // 2) Common format: right after "YYYY|City (India)|Funding"
+  const foundedIdx = lines.findIndex(l => /\b(19|20)\d{2}\b\s*\|/.test(l) && /\|/.test(l));
+  if (foundedIdx >= 0) {
+    for (let j = foundedIdx + 1; j < Math.min(lines.length, foundedIdx + 7); j++) {
+      const l = lines[j];
+      if (/[>›»→]/.test(l) && !/^https?:\/\//i.test(l) && l.length <= 220) {
+        return cleanStr(l.replace(/^[^A-Za-z0-9]+/, ""));
+      }
+      if (/^Website\b/i.test(l)) break;
+    }
+  }
+
+  // 3) Fallback regex over full text
+  const m = text.match(
+    /(?:Healthcare|Logistics|Renewables?|Consumer|IT|Software|SaaS|Pharma|Pharmaceuticals|Chemicals|Materials)\b\s*(?:[>›»→]\s*[^\n]{2,})+/i
+  );
+  if (m) return cleanStr(m[0].replace(/^[^A-Za-z0-9]+/, ""));
+
+  return null;
+}
+
+
+function splitSectorPath(path: string): string[] {
+  return cleanStr(path)
+    .replace(/^[^A-Za-z0-9]+/, "")          // remove leading icons
+    .split(/\s*[>›»→]\s*/g)                // support different separators
+    .map(s => cleanStr(s))
+    .filter(Boolean);
+}
+
+function mapSectorAndSubSector(sectorPath: string | null): { sector?: string; subSector?: string } {
+  if (!sectorPath) return {};
+
+  const parts = splitSectorPath(sectorPath);
+  if (!parts.length) return {};
+
+  const primary = parts[0];                         // first segment
+  const rest = parts.slice(1).join(" > ");          // everything after
+
+  const sp = sectorPath.toLowerCase();
+
+  if (sp.includes("pharma") || sp.includes("pharmaceutical") || sp.includes("healthcare")) {
+    return { sector: "Healthcare & Pharma", subSector: rest || primary };
+  }
+  if (sp.includes("logistics")) return { sector: "Logistics", subSector: rest || primary };
+  if (sp.includes("renewable") || sp.includes("solar") || sp.includes("energy")) return { sector: "Renewables", subSector: rest || primary };
+  if (sp.includes("consumer") || sp.includes("retail") || sp.includes("f&b")) return { sector: "Consumer", subSector: rest || primary };
+  if (sp.includes("it") || sp.includes("software") || sp.includes("saas")) return { sector: "IT", subSector: rest || primary };
+  if (sp.includes("staffing") || sp.includes("recruit") || sp.includes("manpower") || sp.includes("hr")) return { sector: "HR", subSector: rest || primary };
+
+  // Generic fallback: sector = first segment, sub-sector = remaining breadcrumb
+  return { sector: primary, subSector: rest || undefined };
+}
+
+
+function parseTracxnOnePager(textRaw: string) {
+  const text = cleanStr(textRaw);
+
+  const companyName = pickCompanyName(text);
+  const location = pickLocationCity(text);
+  const businessDescription = pickBusinessDescription(text);
+  const website = pickWebsite(text);
+  const email = pickEmail(text);
+  const phone = pickPhone(text);
+  const keyPersons = pickKeyPersons(text);
+
+
+  const revenueInrCr = pickAnnualRevenueCr(text);
+
+  // EBITDA + PAT from financial statement rows (prefer INR Cr lines)
+  // ✅ EBITDA + PAT: handle Tracxn tables where values come on next lines
+  const ebitdaInrCr =
+    pickFirstCrAfterLabel(text, /^EBITDA\b/i) ??
+    pickLastCrNumber(pickBestLineWithCr(text, /^EBITDA\b/i));
+
+  const PAT_LABEL = /\b(Net\s*Pro(?:fi)?t(?:\/Loss)?|NetProfit|PAT|Profit\s*After\s*Tax)\b/i;
+
+  const patInrCr =
+    pickFirstCrAfterLabel(text, PAT_LABEL) ??
+    pickFirstCrNumber(pickBestLineWithCr(text, PAT_LABEL));
+
+
+
+  const sectorPath = pickSectorPath(text);
+  const { sector, subSector } = mapSectorAndSubSector(sectorPath);
+
+  return {
+    companyName,
+    sector: sector || null,
+    subSector: subSector || null,
+    location: location || null,
+    website: website || null,
+    businessDescription: businessDescription || null,
+    revenueInrCr: revenueInrCr ?? null,
+    ebitdaInrCr: ebitdaInrCr ?? null,
+    patInrCr: patInrCr ?? null,
+
+    // useful extras from Tracxn (optional)
+    keyPersons: keyPersons || null,
+    email: email || null,
+    phone: phone || null,
+
+    // for debugging (optional)
+    sectorPath: sectorPath || null,
+  };
+}
+
+
     function parseNumber(val: string | null | undefined): number | null {
   if (!val) return null;
   const num = parseFloat(val);
   return isNaN(num) ? null : num;
 }
+
+app.post(
+  "/api/tracxn/parse-onepager",
+  authMiddleware,
+  requireRole(["partner", "admin", "analyst", "intern"]),
+  tracxnUpload.single("file"),
+  async (req: any, res) => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({ message: "PDF file is required (field name: file)" });
+      }
+
+      const pdfParsePkg: any = require("pdf-parse");
+
+      // v2+ exports { PDFParse }, v1 exported a function
+      const PDFParseClass: any =
+        pdfParsePkg?.PDFParse ??
+        pdfParsePkg?.default?.PDFParse ??
+        null;
+
+      async function extractPdfText(buffer: Buffer): Promise<string> {
+        // v1 API: pdfParse(buffer) -> { text }
+        if (typeof pdfParsePkg === "function") {
+          const r = await pdfParsePkg(buffer);
+          return r?.text || "";
+        }
+
+        // v2+ API: new PDFParse({ data: buffer }).getText() -> { text }
+        if (typeof PDFParseClass === "function") {
+          const parser = new PDFParseClass({ data: buffer });
+          const r = await parser.getText();
+          if (typeof parser.destroy === "function") await parser.destroy();
+          return r?.text || "";
+        }
+
+        throw new Error("pdf-parse export not supported (expected function or PDFParse class)");
+      }
+
+      const text = await extractPdfText(req.file.buffer);
+      const extracted = parseTracxnOnePager(text || "");
+
+
+      return res.json({ success: true, extracted });
+    } catch (err: any) {
+      console.error("Tracxn parse failed:", err);
+      return res.status(500).json({ message: err?.message || "Failed to parse Tracxn PDF" });
+    }
+  }
+);
 
 
 app.post(
@@ -1169,6 +1578,31 @@ app.post(
         res.status(400).json({ message: 'Failed to update company', error: error instanceof Error ? error.message : 'Unknown error' });
       }
     });
+  // ✅ Contacts: make LinkedIn optional (validate only if provided)
+const contactFormSchemaOptionalLinkedIn = z.object({
+  companyId: z.coerce.number(),
+  name: z.string().min(1, "Name is required"),
+  designation: z.string().min(1, "Designation is required"),
+  email: z.string().optional().nullable(),
+  phone: z.string().optional().nullable(),
+
+  // LinkedIn is OPTIONAL now
+  linkedinProfile: z
+    .string()
+    .optional()
+    .nullable()
+    .transform((v) => {
+      const s = (v ?? "").toString().trim();
+      return s.length ? s : null;
+    })
+    .refine((v) => !v || v.includes("linkedin.com"), {
+      message: "Please enter a valid LinkedIn URL",
+    }),
+
+  isPrimary: z.coerce.boolean().optional(),
+});
+
+const updateContactSchemaOptionalLinkedIn = contactFormSchemaOptionalLinkedIn.partial();
 
     // Contact routes
     app.post('/api/contacts', authMiddleware, async (req: any, res) => {
@@ -1177,7 +1611,7 @@ app.post(
         if (!currentUser || !currentUser.organizationId) {
           return res.status(401).json({ message: 'User organization not found' });
         }
-        const contactData = contactFormSchema.parse(req.body); // organizationId excluded from client input
+        const contactData = contactFormSchema.parse(req.body); // LinkedIn optional
         const contact = await storage.createContact({ ...contactData, organizationId: currentUser.organizationId });
         
         // Update lead POC count and status after creating contact
@@ -1194,7 +1628,9 @@ app.post(
               // Determine POC completion status based on contact completeness
               let pocCompletionStatus = 'red'; // Default
               if (pocCount > 0) {
-                const completeContacts = companyContacts.filter(c => c.isComplete);
+                const completeContacts = companyContacts.filter(
+                  (c: any) => !!(c.name && c.name.trim() && c.designation && c.designation.trim())
+                );
                 if (completeContacts.length >= 1) {
                   pocCompletionStatus = pocCount >= 3 ? 'green' : 'amber';
                 }
@@ -1206,14 +1642,15 @@ app.post(
                 pocCompletionStatus
               });
               
-              // Auto-qualify lead if primary contact has Name + Designation + LinkedIn URL
+              // Auto-qualify lead if primary contact has Name + Designation
               // and the lead is currently in 'universe' stage
               if (lead.stage === 'universe') {
-                const primaryContact = companyContacts.find(c => c.isPrimary);
-                if (primaryContact && 
-                    primaryContact.name && 
-                    primaryContact.designation && 
-                    primaryContact.linkedinProfile) {
+                const primaryContact = companyContacts.find((c: any) => c.isPrimary);
+                if (
+                  primaryContact &&
+                  primaryContact.name && primaryContact.name.trim() &&
+                  primaryContact.designation && primaryContact.designation.trim()
+                ) {
                   // Auto-qualify the lead
                   await storage.updateLead(lead.id, currentUser.organizationId, {
                     stage: 'qualified'
@@ -1277,7 +1714,7 @@ app.post(
         if (!currentUser || !currentUser.organizationId) {
           return res.status(401).json({ message: 'User organization not found' });
         }
-        const updates = updateContactSchema.parse(req.body); // Security: organizationId cannot be changed
+        const updates = updateContactSchema.parse(req.body);  // LinkedIn optional
         const contact = await storage.updateContact(parseInt(req.params.id), currentUser.organizationId, updates);
         
         // After updating contact, check for auto-qualification
@@ -1294,7 +1731,9 @@ app.post(
               // Determine POC completion status
               let pocCompletionStatus = 'red';
               if (pocCount > 0) {
-                const completeContacts = companyContacts.filter(c => c.isComplete);
+                const completeContacts = companyContacts.filter(
+                  (c: any) => !!(c.name && c.name.trim() && c.designation && c.designation.trim())
+                );
                 if (completeContacts.length >= 1) {
                   pocCompletionStatus = pocCount >= 3 ? 'green' : 'amber';
                 }
@@ -1309,10 +1748,11 @@ app.post(
               // Auto-qualify lead if primary contact has Name + Designation + LinkedIn URL
               if (lead.stage === 'universe') {
                 const primaryContact = companyContacts.find(c => c.isPrimary);
-                if (primaryContact && 
-                    primaryContact.name && 
-                    primaryContact.designation && 
-                    primaryContact.linkedinProfile) {
+                if (
+                  primaryContact &&
+                  primaryContact.name && primaryContact.name.trim() &&
+                  primaryContact.designation && primaryContact.designation.trim()
+                ) {
                   // Auto-qualify the lead
                   await storage.updateLead(lead.id, currentUser.organizationId, {
                     stage: 'qualified'
