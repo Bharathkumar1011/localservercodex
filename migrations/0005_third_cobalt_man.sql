@@ -1,0 +1,2 @@
+ALTER TABLE "leads" ADD COLUMN "assigned_partner_id" varchar;--> statement-breakpoint
+ALTER TABLE "leads" ADD CONSTRAINT "leads_assigned_partner_id_users_id_fk" FOREIGN KEY ("assigned_partner_id") REFERENCES "public"."users"("id") ON DELETE no action ON UPDATE no action;

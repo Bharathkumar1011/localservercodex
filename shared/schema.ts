@@ -49,7 +49,7 @@ export const users = pgTable("users", {
   profileImageUrl: varchar("profile_image_url"),
   role: varchar("role", { length: 20 }).notNull().default('analyst'), // analyst, partner, admin, intern
   isSuspended: boolean("is_suspended").notNull().default(false),
-  managerId: varchar("manager_id").references((): any => users.id), // For analysts: their partner
+  partnerId: varchar("manager_id").references((): any => users.id), // For analysts: their partner
   analystId: varchar("analyst_id").references((): any => users.id), // For interns: their analyst
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
@@ -133,6 +133,7 @@ export const leads = pgTable("leads", {
   ownerAnalystId: varchar("owner_analyst_id").references(() => users.id), // Analyst who owns/created this lead
    createdBy: varchar("created_by").references(() => users.id).notNull(), // User who created this lead
   assignedTo: varchar("assigned_to").references(() => users.id), // Deprecated: Use assignedInterns instead
+  assignedPartnerId: varchar("assigned_partner_id").references(() => users.id), // Partner assigned to this lead
   assignedInterns: text("assigned_interns").array(), // Array of intern user IDs assigned to this lead
   pipelineValue: decimal("pipeline_value", { precision: 15, scale: 2 }),
   probability: decimal("probability", { precision: 5, scale: 2 }).default('0'), // 0-100
@@ -415,7 +416,7 @@ export const invitationFormSchema = z.object({
   role: z.enum(['analyst', 'manager', 'admin', 'intern'], {
     required_error: "Please select a role",
   }),
-  managerId: z.string().optional(), // For analysts: assign to a manager
+  partnerId: z.string().optional(), // For analysts: assign to a manager
   analystId: z.string().optional(), // For interns: assign to an analyst
 }).refine(data => {
   // For interns, analystId is required

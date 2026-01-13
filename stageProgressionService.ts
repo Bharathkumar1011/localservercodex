@@ -19,7 +19,7 @@ export interface StageValidationResult {
 export class StageProgressionService {
   constructor(private storage: IStorage) {}
 
-  private validStages = ['universe', 'qualified', 'outreach', 'pitching', 'mandates', 'won', 'lost', 'rejected'];
+  private validStages = ['universe', 'qualified', 'outreach', 'pitching', 'mandates', 'won', 'lost', 'rejected', 'hold', 'dropped'];
   
   private stageProgression = {
     'universe': ['qualified'],
@@ -36,18 +36,51 @@ export class StageProgressionService {
    * Get all valid next stages for a given current stage
    */
   getValidNextStages(currentStage: string): string[] {
-    return this.stageProgression[currentStage as keyof typeof this.stageProgression] || [];
+    // Terminal + Hold: no "auto" next stages
+    if (['won', 'lost', 'rejected', 'hold', 'dropped'].includes(currentStage)) return [];
+
+    const base = this.stageProgression[currentStage as keyof typeof this.stageProgression] || [];
+    // From any non-terminal stage you can go to Hold or Rejected
+    return Array.from(new Set([...base, 'hold',  'dropped', 'rejected']));
   }
+
 
   /**
    * Check if a stage transition is valid
    */
   isValidTransition(fromStage: string, toStage: string): boolean {
-    if (fromStage === toStage) return true; // Same stage is always valid
-    
+    if (fromStage === toStage) return true;
+
+    // Lock terminal stages
+    // Lock terminal stages (keep won/lost terminal)
+    if (['won', 'lost'].includes(fromStage)) return false;
+
+    // Rejected → allow moving back to any non-terminal stage
+    if (fromStage === 'rejected') {
+      // allow universe/qualified/outreach/pitching/mandates/hold/dropped (and rejected->rejected is already handled above)
+      return !['won', 'lost'].includes(toStage);
+    }
+
+    // Any stage → Hold
+    if (toStage === 'hold') return true;
+
+    // Hold → any stage
+    if (fromStage === 'hold') return true;
+
+    // Any stage → Dropped
+    if (toStage === 'dropped') return true;
+
+    // Dropped → any stage
+    if (fromStage === 'dropped') return true;
+
+
+    // Any stage → Rejected (non-terminal only, since terminals blocked above)
+    if (toStage === 'rejected') return true;
+
     const validNextStages = this.getValidNextStages(fromStage);
     return validNextStages.includes(toStage);
   }
+
 
   /**
    * Validate if lead meets requirements for a specific stage
@@ -96,47 +129,53 @@ export class StageProgressionService {
         }
         break;
 
-      case 'pitching':
-        // Requires outreach stage requirements PLUS at least one outreach activity
+      case 'pitching': {
+        // Requires outreach stage requirements PLUS (completed outreach OR recorded meeting)
         const outreachValidation = await this.validateStageRequirements(lead, 'outreach', contact, outreachActivities);
         if (!outreachValidation.isValid) {
           errors.push(...outreachValidation.errors);
           missingFields.push(...outreachValidation.missingFields);
         }
 
-        if (!outreachActivities || outreachActivities.length === 0) {
-          errors.push('At least one outreach activity is required before pitching stage');
-          missingFields.push('outreachActivities');
-        } else {
-          // Check if there's at least one completed outreach
-          const hasCompletedOutreach = outreachActivities.some(activity => 
-            activity.status === 'completed'
-          );
-          if (!hasCompletedOutreach) {
-            errors.push('At least one completed outreach activity is required before pitching');
-            missingFields.push('completedOutreach');
-          }
+        // ✅ Outreach activities check (existing logic)
+        const hasCompletedOutreach =
+          Array.isArray(outreachActivities) &&
+          outreachActivities.some(a => a.status === "completed");
+
+        // ✅ NEW: Meeting/Outreach intervention check (your modal records a meeting)
+        const interventions = await this.storage.getInterventions(lead.id, lead.organizationId);
+
+        // Be tolerant: depending on your DB, meeting type might be "meeting" or "outreach"
+        const hasRecordedMeeting = Array.isArray(interventions) && interventions.some((i: any) =>
+          i.type === "meeting" || i.type === "outreach" || i.type === "call"
+        );
+
+        // Require at least one of them
+        if (!hasCompletedOutreach && !hasRecordedMeeting) {
+          errors.push("At least one outreach activity OR a recorded meeting is required before pitching stage");
+          missingFields.push("outreachActivities");
         }
+
         break;
+      }
+
 
       case 'mandates':
-        // Requires pitching stage requirements PLUS Letter of Engagement document
-        const pitchingValidation = await this.validateStageRequirements(lead, 'pitching', contact, outreachActivities);
+        // Requires pitching stage requirements (NO LOE requirement)
+        const pitchingValidation = await this.validateStageRequirements(
+          lead,
+          'pitching',
+          contact,
+          outreachActivities
+        );
+
         if (!pitchingValidation.isValid) {
           errors.push(...pitchingValidation.errors);
           missingFields.push(...pitchingValidation.missingFields);
         }
 
-        // Check for Letter of Engagement document
-        const interventions = await this.storage.getInterventions(lead.id, lead.organizationId);
-        const hasLetterOfEngagement = interventions.some(
-          (intervention: any) => intervention.type === 'document' && intervention.documentName === 'Letter of Engagement'
-        );
-        if (!hasLetterOfEngagement) {
-          errors.push('Letter of Engagement document is required for Mandates stage');
-          missingFields.push('Letter of Engagement');
-        }
         break;
+
 
       case 'won':
         // Check if coming from mandates stage - if so, requires Contract document
@@ -149,8 +188,8 @@ export class StageProgressionService {
 
           // Check for Contract document
           const interventionsForWon = await this.storage.getInterventions(lead.id, lead.organizationId);
-          const hasContract = interventionsForWon.some(
-            (intervention: any) => intervention.type === 'document' && intervention.documentName === 'Contract'
+          const hasContract = interventionsForWon.some((i: any) =>
+            i.type === "document" && normalizeDocName(i.documentName) === "contract"
           );
           if (!hasContract) {
             errors.push('Contract document is required to move from Mandates to Won');
@@ -193,6 +232,16 @@ export class StageProgressionService {
         }
         break;
 
+      
+      case 'hold':
+        // Hold has no requirements
+        break;
+
+      case 'dropped':
+        // Dropped has no requirements (same as Hold)
+        break;
+
+
       case 'rejected':
         // Rejected can happen at any stage, but requires a reason
         if (!lead.notes || lead.notes.trim() === '') {
@@ -200,6 +249,7 @@ export class StageProgressionService {
           missingFields.push('notes');
         }
         break;
+
 
       default:
         errors.push(`Unknown stage: ${targetStage}`);
@@ -331,13 +381,17 @@ export class StageProgressionService {
       case 'outreach':
         return ['contact.name', 'contact.designation', 'contact.linkedinProfile', 'assignedTo'];
       case 'pitching':
-        return ['contact.name', 'contact.designation', 'contact.linkedinProfile', 'assignedTo', 'outreachActivities'];
+        return ['contact.name', 'contact.designation', 'contact.linkedinProfile', 'assignedTo', 'outreachActivitiesOrMeeting'];
       case 'mandates':
-        return ['contact.name', 'contact.designation', 'contact.linkedinProfile', 'assignedTo', 'outreachActivities', 'Letter of Engagement'];
+        return ['contact.name', 'contact.designation', 'contact.linkedinProfile', 'assignedTo', 'outreachActivities'];
       case 'won':
         return ['contact.name', 'contact.designation', 'contact.linkedinProfile', 'assignedTo', 'outreachActivities', 'Contract', 'notes'];
       case 'lost':
         return ['contact.name', 'contact.designation', 'contact.linkedinProfile', 'assignedTo', 'outreachActivities', 'notes'];
+      case 'hold':
+       return [];
+      case 'dropped':
+       return [];
       case 'rejected':
         return ['notes'];
       default:

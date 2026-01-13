@@ -246,42 +246,150 @@ export const companyService = {
             assignedTo,
             createdBy: currentUser.id,
           });
+          results.successfulLeads++;
         }
-        results.successfulLeads++;
 
 
         // --- Primary contact (supports BOTH templates)
-        const contactData = {
-          organizationId,
-          companyId: company.id,
-          name: pick(row, ["Primary Contact Name", "POC 1 Name"]),
-          designation: pick(row, ["Primary Contact Designation", "Designation 1", "POC 1 Designation"]),
-          email: pick(row, ["Primary Contact Email", "Email ID 1", "POC 1 Email"]),
-          phone: pick(row, ["Primary Contact Phone", "Phone Number 1", "POC 1 Phone Number"]),
-          linkedinProfile: pick(row, ["Primary Contact LinkedIn", "LinkedIn 1", "POC 1 Linkedin"]),
-          isPrimary: true,
+        // --- Contacts (POC1 / POC2 / POC3) with UPSERT (no duplicates on re-upload)
+
+        // treat NA/N-A/blank as empty
+        const isEmpty = (v: any) => {
+          if (v === undefined || v === null) return true;
+          const s = String(v).trim();
+          if (!s) return true;
+          const n = norm(s);
+          return n === "na" || n === "n/a" || n === "null" || n === "-";
         };
 
-        if (contactData.name || contactData.email || contactData.phone) {
-          await storage.createContact(contactData);
-          results.successfulContacts++;
+        // normalize phone (handles Excel scientific notation like 9.17962E+12)
+        const normalizePhone = (v: any) => {
+          if (isEmpty(v)) return null;
+          const s = String(v).trim();
+          if (/[eE]/.test(s)) {
+            const num = Number(s);
+            if (!Number.isNaN(num)) return BigInt(Math.round(num)).toString();
+          }
+          // keep digits + plus
+          return s.replace(/[^\d+]/g, "");
+        };
 
-          // keep your POC status update logic (unchanged)
+        const pocsFromCsv = [
+          // POC 1 (Primary)
+          {
+            isPrimary: true,
+            name: pick(row, ["Primary Contact Name", "POC 1 Name"]),
+            designation: pick(row, ["Primary Contact Designation", "Designation 1", "POC 1 Designation"]),
+            email: pick(row, ["Primary Contact Email", "Email ID 1", "POC 1 Email"]),
+            phone: pick(row, ["Primary Contact Phone", "Phone Number 1", "POC 1 Phone Number"]),
+            linkedinProfile: pick(row, ["Primary Contact LinkedIn", "LinkedIn 1", "POC 1 Linkedin"]),
+          },
+
+          // POC 2
+          {
+            isPrimary: false,
+            name: pick(row, ["POC Name 2", "POC 2 Name"]),
+            designation: pick(row, ["Designation 2", "POC 2 Designation"]),
+            email: pick(row, ["Email ID 2", "POC 2 Email"]),
+            phone: pick(row, ["POC 2 Number", "Phone Number 2", "POC 2 Phone Number"]),
+            linkedinProfile: pick(row, ["LinkedIn 2", "POC 2 Linkedin"]),
+          },
+
+          // POC 3
+          {
+            isPrimary: false,
+            name: pick(row, ["POC Name 3", "POC 3 Name"]),
+            designation: pick(row, ["Designation 3", "POC 3 Designation"]),
+            email: pick(row, ["Email ID 3", "POC 3 Email"]),
+            phone: pick(row, ["POC 3 Number", "Phone Number 3", "POC 3 Phone Number"]),
+            linkedinProfile: pick(row, ["LinkedIn 3", "POC 3 Linkedin"]),
+          },
+        ]
+          // keep only rows where at least something exists
+          .filter(p => !isEmpty(p.name) || !isEmpty(p.email) || !isEmpty(p.phone) || !isEmpty(p.linkedinProfile) || !isEmpty(p.designation))
+          // clean values
+          .map(p => ({
+            ...p,
+            name: isEmpty(p.name) ? null : String(p.name).trim(),
+            designation: isEmpty(p.designation) ? null : String(p.designation).trim(),
+            email: isEmpty(p.email) ? null : String(p.email).trim(),
+            phone: normalizePhone(p.phone),
+            linkedinProfile: isEmpty(p.linkedinProfile) ? null : String(p.linkedinProfile).trim(),
+          }));
+
+        if (pocsFromCsv.length > 0) {
+          const existingContacts = await storage.getContactsByCompany(company.id, organizationId);
+
+          const byEmail = new Map<string, any>();
+          const byPhone = new Map<string, any>();
+          const byNameDesig = new Map<string, any>();
+
+          for (const c of existingContacts) {
+            if (c.email) byEmail.set(norm(c.email), c);
+            if (c.phone) byPhone.set(norm(c.phone), c);
+            const key = `${norm(c.name || "")}|${norm(c.designation || "")}`;
+            if (c.name || c.designation) byNameDesig.set(key, c);
+          }
+
+          const findMatch = (p: any) => {
+            if (p.email && byEmail.has(norm(p.email))) return byEmail.get(norm(p.email));
+            if (p.phone && byPhone.has(norm(p.phone))) return byPhone.get(norm(p.phone));
+            const key = `${norm(p.name || "")}|${norm(p.designation || "")}`;
+            if ((p.name || p.designation) && byNameDesig.has(key)) return byNameDesig.get(key);
+            return null;
+          };
+
+          for (const poc of pocsFromCsv) {
+            const match = findMatch(poc);
+
+            if (match) {
+              // update ONLY missing fields (no overwriting good data)
+              const patch: any = {};
+
+              if (!match.name && poc.name) patch.name = poc.name;
+              if (!match.designation && poc.designation) patch.designation = poc.designation;
+              if (!match.email && poc.email) patch.email = poc.email;
+              if (!match.phone && poc.phone) patch.phone = poc.phone;
+              if (!match.linkedinProfile && poc.linkedinProfile) patch.linkedinProfile = poc.linkedinProfile;
+
+              // if CSV says primary, allow setting it true (do not force others false)
+              if (poc.isPrimary && !match.isPrimary) patch.isPrimary = true;
+
+              if (Object.keys(patch).length > 0) {
+                await storage.updateContact(match.id, organizationId, patch);
+              }
+            } else {
+              await storage.createContact({
+                organizationId,
+                companyId: company.id,
+                name: poc.name,
+                designation: poc.designation,
+                email: poc.email,
+                phone: poc.phone,
+                linkedinProfile: poc.linkedinProfile,
+                isPrimary: poc.isPrimary,
+              });
+
+              results.successfulContacts++;
+            }
+          }
+
+          // ✅ Update lead POC count/status once after all POCs processed
           try {
             const companyLeads = await storage.getLeadsByCompany(company.id, organizationId);
+            const companyContacts = await storage.getContactsByCompany(company.id, organizationId);
+
+            const pocCount = companyContacts.length;
+
+            let pocCompletionStatus = "red";
+            if (pocCount > 0) {
+              const completeContacts = companyContacts.filter((c: any) => c.isComplete);
+              if (completeContacts.length >= 1) {
+                pocCompletionStatus = pocCount >= 3 ? "green" : "amber";
+              }
+            }
 
             for (const lead of companyLeads) {
-              const companyContacts = await storage.getContactsByCompany(company.id, organizationId);
-              const pocCount = companyContacts.length;
-
-              let pocCompletionStatus = "red";
-              if (pocCount > 0) {
-                const completeContacts = companyContacts.filter((c: any) => c.isComplete);
-                if (completeContacts.length >= 1) {
-                  pocCompletionStatus = pocCount >= 3 ? "green" : "amber";
-                }
-              }
-
               await storage.updateLead(lead.id, organizationId, {
                 pocCount,
                 pocCompletionStatus,

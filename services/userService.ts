@@ -55,7 +55,8 @@ createUser: async (userData: any, req: Request) => {
   const userWithEmail = existingUsers.find(u => u.email.toLowerCase() === normalizedEmail);
   if (userWithEmail) {
     throw new Error('Email already exists');
-  }
+  }const validStages = ['universe', 'qualified', 'outreach', 'pitching', 'mandates', 'won', 'lost', 'rejected'];
+
 
 
 

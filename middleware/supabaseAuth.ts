@@ -64,7 +64,7 @@ export async function requireSupabaseAuth(req: Request, res: Response, next: Nex
         role: appMetadata.role || metadata.role || 'analyst',
         organizationId: metadata.organization_id ?? null,
         analystId: metadata.analyst_id ?? null,
-        managerId: metadata.manager_id ?? null
+        partnerId: metadata.manager_id ?? null
       });
     }
 

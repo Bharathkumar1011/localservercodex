@@ -103,9 +103,24 @@ export interface IStorage {
   getLeadsByStage(stage: string, organizationId: number): Promise<(Lead & { company: Company; contact?: Contact; assignedToUser?: User; ownerAnalystUser?: User })[]>;
   getAllLeads(organizationId: number): Promise<(Lead & { company: Company; contact?: Contact; assignedToUser?: User; ownerAnalystUser?: User })[]>;
   getLeadsByAssignee(userId: string, organizationId: number): Promise<(Lead & { company: Company; contact?: Contact; assignedToUser?: User })[]>;
+  getLeadsByPartner(partnerId: string, organizationId: number): Promise<(Lead & {
+  company: Company;
+  contact?: Contact;
+  assignedToUser?: User;
+  assignedInternUsers?: User[];
+  ownerAnalystUser?: User;
+  createdByUser?: User;
+  })[]>;
   getLeadsByCompany(companyId: number, organizationId: number): Promise<Lead[]>;
   updateLead(id: number, organizationId: number, updates: Partial<UpsertLead>): Promise<Lead | undefined>;
-  assignLead(leadId: number, organizationId: number, assignedTo: string | null, assignedBy: string, notes?: string): Promise<void>;
+  assignLead(
+    leadId: number,
+    organizationId: number,
+    assignedTo: string | null | undefined,
+    assignedPartnerId: string | null | undefined,
+    assignedBy: string,
+    notes?: string
+  ): Promise<void>;
   assignInternsToLead(leadId: number, organizationId: number, internIds: string[], assignedBy: string, notes?: string): Promise<void>;
   transferLeadOwnership(organizationId: number, fromUserId: string, toUserId: string): Promise<{ transferredCount: number }>;
 
@@ -703,7 +718,16 @@ async getLead(
       }
     }
     
-    const leadsArray = Array.from(leadMap.values());
+    type LeadRow = Lead & {
+      company: Company;
+      contact?: Contact;
+      assignedToUser?: User;
+      assignedInternUsers?: User[];
+      createdByUser?: User;
+    };
+
+    const leadsArray: LeadRow[] = Array.from(leadMap.values());
+
     
     // Fetch assigned interns for all leads
     const leadIds = leadsArray.map(l => l.id);
@@ -738,6 +762,88 @@ async getLead(
     
     return leadsArray;
   }
+async getLeadsByPartner(partnerId: string, organizationId: number): Promise<(Lead & {
+  company: Company;
+  contact?: Contact;
+  assignedToUser?: User;
+  assignedInternUsers?: User[];
+  ownerAnalystUser?: User;
+  createdByUser?: User;
+})[]> {
+  const assignedToUsers = alias(users, 'assignedToUser');
+  const ownerAnalystUsers = alias(users, 'ownerAnalystUser');
+  const creator = alias(users, "creator");
+
+  const result = await db
+    .select({
+      lead: leads,
+      company: companies,
+      contact: contacts,
+      assignedToUser: assignedToUsers,
+      ownerAnalystUser: ownerAnalystUsers,
+      createdByUser: creator
+    })
+    .from(leads)
+    .innerJoin(companies, eq(leads.companyId, companies.id))
+    .leftJoin(contacts, and(eq(contacts.companyId, companies.id), eq(contacts.isPrimary, true)))
+    .leftJoin(assignedToUsers, eq(leads.assignedTo, assignedToUsers.id))
+    .leftJoin(ownerAnalystUsers, eq(leads.ownerAnalystId, ownerAnalystUsers.id))
+    .leftJoin(creator, eq(leads.createdBy, creator.id))
+    .where(and(
+      eq(leads.organizationId, organizationId),
+      eq(leads.assignedPartnerId, partnerId)
+    ))
+    .orderBy(desc(leads.updatedAt));
+
+  const leadMap = new Map<number, Lead & {
+    company: Company;
+    contact?: Contact;
+    assignedToUser?: User;
+    assignedInternUsers?: User[];
+    ownerAnalystUser?: User;
+    createdByUser?: User;
+  }>();
+
+  for (const r of result) {
+    if (!leadMap.has(r.lead.id)) {
+      leadMap.set(r.lead.id, {
+        ...r.lead,
+        company: r.company,
+        contact: r.contact || undefined,
+        assignedToUser: r.assignedToUser || undefined,
+        assignedInternUsers: [],
+        ownerAnalystUser: r.ownerAnalystUser || undefined,
+        createdByUser: r.createdByUser || undefined
+      });
+    }
+  }
+
+  const leadsArray = Array.from(leadMap.values());
+
+  // same intern mapping block you already use in getAllLeads
+  const allInternIds: string[] = [];
+  for (const lead of leadsArray) {
+    if (lead.assignedInterns && Array.isArray(lead.assignedInterns)) {
+      allInternIds.push(...lead.assignedInterns);
+    }
+  }
+
+  if (allInternIds.length > 0) {
+    const uniqueInternIds = [...new Set(allInternIds)];
+    const assignedInterns = await db.select().from(users).where(inArray(users.id, uniqueInternIds));
+    const internsMap = new Map(assignedInterns.map(u => [u.id, u]));
+
+    for (const lead of leadsArray) {
+      if (lead.assignedInterns && Array.isArray(lead.assignedInterns)) {
+        lead.assignedInternUsers = lead.assignedInterns
+          .map(id => internsMap.get(id))
+          .filter((u): u is User => u !== undefined);
+      }
+    }
+  }
+
+  return leadsArray;
+}
 
   // In storage.ts
 
@@ -845,58 +951,64 @@ async getLead(
     return lead;
   }
 
-  async assignLead(leadId: number, organizationId: number, assignedTo: string | null, assignedBy: string, notes?: string): Promise<void> {
-    // Get the current lead to check its stage for universe status logic
+  async assignLead(
+    leadId: number,
+    organizationId: number,
+    assignedTo: string | null | undefined,
+    assignedPartnerId: string | null | undefined,
+    assignedBy: string,
+    notes?: string
+  ): Promise<void> {
     const [currentLead] = await db
       .select()
       .from(leads)
       .where(and(eq(leads.id, leadId), eq(leads.organizationId, organizationId)));
-    
-    if (!currentLead) {
-      throw new Error('Lead not found');
-    }
-    
-    // Determine universe status based on assignment (only for universe stage leads)
-    let updateData: any = { assignedTo, updatedAt: new Date() };
-    if (currentLead.stage === 'universe') {
-      updateData.universeStatus = assignedTo ? 'assigned' : 'open';
-    }
-    
-    // If assigning to a user, check if they're an analyst
-    // If yes, also update ownerAnalystId so they become the owner
-    if (assignedTo) {
-      const [assignee] = await db
-        .select()
-        .from(users)
-        .where(and(eq(users.id, assignedTo), eq(users.organizationId, organizationId)));
-      
-      if (assignee && assignee.role === 'analyst') {
-        updateData.ownerAnalystId = assignedTo;
 
+    if (!currentLead) throw new Error("Lead not found");
 
-        // ✅ AUTO MOVE: Universe -> Qualified when assigned to analyst
-        if (currentLead.stage === 'universe') {
-          updateData.stage = 'qualified';
-          updateData.stageUpdatedAt = new Date();
+    // Compute final values (PATCH semantics)
+    const nextAssignedTo = assignedTo === undefined ? currentLead.assignedTo : assignedTo;
+    const nextAssignedPartnerId =
+      assignedPartnerId === undefined ? (currentLead as any).assignedPartnerId : assignedPartnerId;
+
+    const updateData: any = { updatedAt: new Date() };
+
+    if (assignedTo !== undefined) updateData.assignedTo = assignedTo;
+    if (assignedPartnerId !== undefined) updateData.assignedPartnerId = assignedPartnerId;
+
+    // Universe status should reflect either assignment
+    if (currentLead.stage === "universe") {
+      updateData.universeStatus = nextAssignedTo || nextAssignedPartnerId ? "assigned" : "open";
+    }
+
+    // If analyst assigned (not null), set owner + auto move from universe
+    if (assignedTo !== undefined && assignedTo) {
+      const [user] = await db.select().from(users).where(eq(users.id, assignedTo));
+      if (!user) throw new Error("Assigned user not found");
+      if (user.role !== "analyst") throw new Error("Assigned user must be an analyst");
+
+      updateData.ownerAnalystId = assignedTo;
+
+      if (currentLead.stage === "universe") {
+        updateData.stage = "qualified";
       }
     }
+
+    await db.update(leads).set(updateData).where(eq(leads.id, leadId));
+
+    // ✅ Only write assignment history when analyst assignment is explicitly part of the request
+    if (assignedTo !== undefined && assignedTo !== null) {
+      await db.insert(leadAssignments).values({
+        leadId,
+        organizationId,
+        assignedTo,
+        assignedBy,
+        notes: notes || null,
+      });
+    }
   }
-    
-    // Update the lead assignment and universe status
-    await db
-      .update(leads)
-      .set(updateData)
-      .where(and(eq(leads.id, leadId), eq(leads.organizationId, organizationId)));
-    
-    // Record the assignment history
-    await db.insert(leadAssignments).values({
-      organizationId,
-      leadId,
-      assignedBy,
-      assignedTo,
-      notes,
-    });
-  }
+
+
 
   async assignInternsToLead(leadId: number, organizationId: number, internIds: string[], assignedBy: string, notes?: string): Promise<void> {
     // Get the current lead to check its stage for universe status logic
@@ -1327,14 +1439,16 @@ async getLead(
     const orgWhereClause = eq(leads.organizationId, organizationId);
     // const whereClause = userId ? and(orgWhereClause, eq(leads.assignedTo, userId)) : orgWhereClause;
     const whereClause = userId
-  ? and(
-      orgWhereClause,
-      or(
-        eq(leads.assignedTo, userId),
-        eq(leads.ownerAnalystId, userId)
-      )
-    )
-  : orgWhereClause;
+      ? and(
+          orgWhereClause,
+          or(
+            eq(leads.assignedTo, userId),
+            eq(leads.ownerAnalystId, userId),
+            eq(leads.assignedPartnerId, userId)
+          )
+        )
+      : orgWhereClause;
+
 
     const [totalResult] = await db
       .select({ count: sql<number>`count(*)` })
@@ -1504,7 +1618,7 @@ async getLead(
   // Team hierarchy operations
   async getTeamTree(organizationId: number, userId?: string): Promise<any> {
     // Get all users in the organization
-    const allUsers = await db.select().from(users).where(eq(users.organizationId, organizationId));
+    const allUsers: User[]  = await db.select().from(users).where(eq(users.organizationId, organizationId));
     
     // Build hierarchy
     const partners = allUsers.filter(u => u.role === 'partner');

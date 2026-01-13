@@ -286,7 +286,8 @@ const authMiddleware = requireSupabaseAuth;
         const userRole = user.role || 'analyst';
 
         // Analysts only see their own metrics. Partners/Admins see all.
-        const metricsUserId = userRole === 'analyst' ? userId : undefined;
+        const metricsUserId = (userRole === 'analyst' || userRole === 'partner') ? userId : undefined;
+
 
         const metrics = await storage.getDashboardMetrics(
           Number(user.organizationId),
@@ -1235,6 +1236,7 @@ app.post(
                 lead.id,
                 organizationId,
                 assignedTo,
+                undefined,
                 currentUser.id,
                 "Assigned from CSV upload"
               );
@@ -1466,6 +1468,7 @@ app.post(
               createdLeads[i].id,
               organizationId,
               leadStages[i].assignedTo!,
+              undefined,
               assignedBy,
               'Initial assignment during data population'
             );
@@ -1896,8 +1899,8 @@ const updateContactSchemaOptionalLinkedIn = contactFormSchemaOptionalLinkedIn.pa
     app.get('/api/leads/all', authMiddleware, async (req: any, res) => {
       try {
         console.log("api hit /api/leads/all", req.body);
-        const userId = req.verifiedUser;
-        const user = user.id;
+        const user = req.verifiedUser;
+        const userId = user.id;
         if (!user || !user.organizationId) {
           return res.status(404).json({ message: 'User not found or missing organization' });
         }
@@ -1905,14 +1908,20 @@ const updateContactSchemaOptionalLinkedIn = contactFormSchemaOptionalLinkedIn.pa
         const userRole = user.role || 'analyst';
         
         if (userRole === 'analyst') {
-          // Analysts only see their assigned leads
+          // Analysts only see leads assigned to them
           const leads = await storage.getLeadsByAssignee(userId, user.organizationId);
-          res.json(leads);
-        } else {
-          // Partners and admins can see all leads
-          const leads = await storage.getAllLeads(user.organizationId);
-          res.json(leads);
+          return res.json(leads);
         }
+
+        if (userRole === 'partner') {
+          // Partners only see leads assigned to them (partner assignment)
+          const leads = await storage.getLeadsByPartner(userId, user.organizationId);
+          return res.json(leads);
+        }
+
+        // Admin sees all
+        const leads = await storage.getAllLeads(user.organizationId);
+        return res.json(leads);
       } catch (error) {
         console.error('Error fetching all leads:', error);
         res.status(500).json({ message: 'Failed to fetch all leads' });
@@ -1942,59 +1951,46 @@ const updateContactSchemaOptionalLinkedIn = contactFormSchemaOptionalLinkedIn.pa
 
     app.get('/api/leads/stage/:stage', authMiddleware, validateStage, async (req: any, res) => {
       try {
-        // Verify role from storage and enforce access control
         const user = req.verifiedUser;
-        const userId = user.id;
+        const userId = user?.id;
 
         if (!user || !user.organizationId) {
           return res.status(404).json({ message: 'User not found or missing organization' });
         }
-        
+
         const userRole = user.role || 'analyst';
-        
+        const stage = req.params.stage;
+
+        // ✅ Universe = ALL leads (same behavior as your Universe tab)
+        const isUniverse = stage === 'universe';
+
         if (userRole === 'analyst') {
-          // Analysts only see their assigned leads in this stage
           const allAssignedLeads = await storage.getLeadsByAssignee(userId, user.organizationId);
-          const filteredLeads = allAssignedLeads.filter(lead => lead.stage === req.params.stage);
-          res.json(filteredLeads);
-        } else {
-          // Only partners and admins can see all leads in a stage
-          const leads = await storage.getLeadsByStage(req.params.stage, user.organizationId);
-          console.log("🔥 [API] OUTGOING LEADS:", JSON.stringify(leads[0], null, 2));
-          res.json(leads);
+          const filtered = isUniverse ? allAssignedLeads : allAssignedLeads.filter(l => l.stage === stage);
+          return res.json(filtered);
         }
+
+        if (userRole === 'partner') {
+          const partnerLeads = await storage.getLeadsByPartner(userId, user.organizationId);
+          const filtered = isUniverse ? partnerLeads : partnerLeads.filter(l => l.stage === stage);
+          return res.json(filtered);
+        }
+
+        // admin
+        if (isUniverse) {
+          const all = await storage.getAllLeads(user.organizationId);
+          return res.json(all);
+        }
+
+        const leads = await storage.getLeadsByStage(stage, user.organizationId);
+        return res.json(leads);
+
       } catch (error) {
         console.error('Error fetching leads by stage:', error);
-        res.status(500).json({ message: 'Failed to fetch leads' });
+        return res.status(500).json({ message: 'Failed to fetch leads' });
       }
     });
 
-    // GET leads assigned to current intern user (for intern dashboard)
-    app.get('/api/leads/assigned', authMiddleware, requireRole(['intern']), async (req: any, res) => {
-      try {
-        const currentUser = req.verifiedUser;
-        if (!currentUser || !currentUser.organizationId) {
-          return res.status(401).json({ message: 'User organization not found' });
-        }
-
-        // Fetch all leads where current user is in assignedInterns array
-        const allLeads = await storage.getAllLeads(currentUser.organizationId);
-        const assignedLeads = allLeads.filter(lead => 
-          lead.assignedInterns && lead.assignedInterns.includes(currentUser.id)
-        );
-
-        // Add assignment date from updatedAt or createdAt
-        const leadsWithAssignmentDate = assignedLeads.map(lead => ({
-          ...lead,
-          assignmentDate: lead.updatedAt?.toISOString() || lead.createdAt?.toISOString()
-        }));
-
-        res.json(leadsWithAssignmentDate);
-      } catch (error) {
-        console.error('Error fetching assigned leads for intern:', error);
-        res.status(500).json({ message: 'Failed to fetch assigned leads' });
-      }
-    });
 
     app.get('/api/leads/assigned/:userId', authMiddleware, requireRole(['partner', 'admin']), async (req: any, res) => {
       try {
@@ -2016,7 +2012,13 @@ const updateContactSchemaOptionalLinkedIn = contactFormSchemaOptionalLinkedIn.pa
     app.get('/api/leads/:id', authMiddleware, validateIntParam('id'), validateResourceExists('lead'), async (req: any, res) => {
       try {
         // Lead already validated by middleware
-        res.json(req.resource);
+        const lead = req.resource;
+
+        if (req.verifiedUser.role === 'partner' && lead.assignedPartnerId !== req.verifiedUser.id) {
+          return res.status(403).json({ message: 'Access denied' });
+        }
+
+        res.json(lead);
       } catch (error) {
         console.error('Error fetching lead:', error);
         res.status(500).json({ message: 'Failed to fetch lead' });
@@ -2096,7 +2098,7 @@ const updateContactSchemaOptionalLinkedIn = contactFormSchemaOptionalLinkedIn.pa
         }
         
         // Validate stage is a valid value
-        const validStages = ['universe', 'qualified', 'outreach', 'pitching', 'mandates', 'won', 'lost', 'rejected'];
+        const validStages = ['universe', 'qualified', 'outreach', 'pitching', 'mandates', 'won', 'lost', 'hold', 'dropped', 'rejected'];
         if (!validStages.includes(stage)) {
           return res.status(400).json({ message: 'Invalid stage value' });
         }
@@ -2113,14 +2115,31 @@ const updateContactSchemaOptionalLinkedIn = contactFormSchemaOptionalLinkedIn.pa
         const isOutreachToPitching = currentLead.stage === 'outreach' && stage === 'pitching';
         const isPitchingToMandates = currentLead.stage === 'pitching' && stage === 'mandates';
         
-        if (!isQualifiedToOutreach && !isOutreachToPitching && !isPitchingToMandates) {
-          return res.status(400).json({ 
-            message: 'This endpoint only supports manual transitions: Qualified→Outreach, Outreach→Pitching, or Pitching→Mandates',
+        const isMoveToHold = stage === 'hold';
+        const isMoveToDropped = stage === 'dropped';
+
+        // IMPORTANT: From Hold/Dropped pages, your UI only does direct PATCH moves to Universe/Qualified.
+        // (Outreach/Pitching/Mandates are handled via their own flows.)
+        const isFromHoldOrDroppedToSimple =
+          (currentLead.stage === 'hold' || currentLead.stage === 'dropped') &&
+          (stage === 'universe' || stage === 'qualified');
+
+        if (
+          !isQualifiedToOutreach &&
+          !isOutreachToPitching &&
+          !isPitchingToMandates &&
+          !isMoveToHold &&
+          !isMoveToDropped &&
+          !isFromHoldOrDroppedToSimple
+        ) {
+          return res.status(400).json({
+            message:
+              'This endpoint only supports: Qualified→Outreach, Outreach→Pitching, Pitching→Mandates, Move→Hold, Move→Dropped, or Hold/Dropped→(Universe/Qualified)',
             currentStage: currentLead.stage,
-            requestedStage: stage
+            requestedStage: stage,
           });
         }
-        
+
         // For outreach → pitching transition, validate that a meeting intervention exists and POC is selected
         if (isOutreachToPitching) {
           const interventions = await storage.getInterventions(leadId, currentUser.organizationId);
@@ -2262,119 +2281,91 @@ const updateContactSchemaOptionalLinkedIn = contactFormSchemaOptionalLinkedIn.pa
       }
     });
 
-    app.post('/api/leads/:id/assign', authMiddleware, requireRole(['partner', 'admin']), validateResourceExists('lead'), async (req: any, res) => {
-      try {
-        const { assignedTo, notes, challengeToken } = req.body;
-        const assignedBy = req.verifiedUser.id;
-        const leadId = parseInt(req.params.id);
-        
-        // Get the current lead to check if it's a reassignment
-        const currentLead = await storage.getLead(leadId, req.verifiedUser.organizationId);
-        if (!currentLead) {
-          return res.status(404).json({ message: 'Lead not found' });
+  app.post(
+  "/api/leads/:id/assign",
+  authMiddleware,
+  requireRole(["admin"]),
+  validateResourceExists("lead"),
+  async (req: any, res) => {
+    try {
+      const { assignedTo, assignedPartnerId, notes, challengeToken } = req.body;
+      const assignedBy = req.verifiedUser.id;
+      const leadId = parseInt(req.params.id, 10);
+      const organizationId = req.verifiedUser.organizationId;
+
+      const currentLead = await storage.getLead(leadId, organizationId);
+      if (!currentLead) return res.status(404).json({ message: "Lead not found" });
+
+      // ✅ PATCH semantics
+      const hasAssignedTo = Object.prototype.hasOwnProperty.call(req.body, "assignedTo");
+      const hasAssignedPartnerId = Object.prototype.hasOwnProperty.call(req.body, "assignedPartnerId");
+
+      // Reassignment only if changing an existing value
+      const analystChanged =
+        hasAssignedTo &&
+        !!currentLead.assignedTo &&
+        currentLead.assignedTo !== assignedTo;
+
+      const partnerChanged =
+        hasAssignedPartnerId &&
+        !!(currentLead as any).assignedPartnerId &&
+        (currentLead as any).assignedPartnerId !== assignedPartnerId;
+
+      const isReassignment = !!(analystChanged || partnerChanged);
+
+      if (isReassignment) {
+        if (!challengeToken) {
+          return res.status(400).json({ message: "Challenge token required for reassignments", isReassignment: true });
         }
-        
-        // Check if this is a reassignment (lead already has an assignedTo value)
-        const isReassignment = currentLead.assignedTo && currentLead.assignedTo !== assignedTo;
-        
-        // For reassignments, require a challenge token
-        if (isReassignment) {
-          if (!challengeToken) {
-            return res.status(400).json({ 
-              message: 'Challenge token required for reassignments',
-              isReassignment: true
-            });
-          }
-          
-          // Validate the challenge token using storage method
-          try {
-            const isValidToken = await storage.validateChallengeToken(
-              challengeToken,
-              req.verifiedUser.id,
-              req.verifiedUser.organizationId,
-              leadId,
-              'reassignment'
-            );
-            
-            if (!isValidToken) {
-              return res.status(400).json({ 
-                message: 'Invalid or expired challenge token',
-                isReassignment: true
-              });
-            }
-          } catch (tokenValidationError) {
-            console.error('Token validation error:', tokenValidationError);
-            return res.status(400).json({ 
-              message: 'Challenge token validation failed',
-              isReassignment: true
-            });
-          }
-          
-          console.log(`Reassignment authorized with challenge token for lead ${leadId}`);
+
+        const isValidToken = await storage.validateChallengeToken(
+          challengeToken,
+          req.verifiedUser.id,
+          organizationId,
+          leadId,
+          "reassignment"
+        );
+
+        if (!isValidToken) {
+          return res.status(400).json({ message: "Invalid or expired challenge token", isReassignment: true });
         }
-        
-        // Support unassigning by allowing null assignedTo
-        if (assignedTo !== null && assignedTo !== undefined) {
-          // Verify the user being assigned to exists
-          const assignedUser = await storage.getUser(assignedTo);
-          if (!assignedUser) {
-            return res.status(404).json({ message: 'Assigned user not found' });
-          }
-        }
-        
-        await storage.assignLead(leadId, req.verifiedUser.organizationId, assignedTo, assignedBy, notes);
-        
-        // Log the assignment activity
-        try {
-          const currentUser = req.verifiedUser || await storage.getUser(assignedBy);
-          const lead = await storage.getLead(parseInt(req.params.id), currentUser.organizationId);
-          if (lead && currentUser) {
-            const company = await storage.getCompany(lead.companyId, currentUser.organizationId);
-            if (company) {
-              const assignedUser = assignedTo ? await storage.getUser(assignedTo) : null;
-              const assignedToName = assignedUser 
-                ? `${assignedUser.firstName || ''} ${assignedUser.lastName || ''}`.trim() || assignedUser.email
-                : undefined;
-              
-              await ActivityLogService.logLeadAssigned(
-                currentUser.organizationId,
-                assignedBy,
-                lead.id,
-                lead.companyId,
-                company.name,
-                assignedTo || null,
-                assignedToName || undefined
-              );
-            }
-          }
-        } catch (logError) {
-          console.error('Error logging assignment activity:', logError);
-          // Don't fail the assignment if logging fails
-        }
-        
-        // Check if lead can auto-progress after assignment
-        try {
-          const currentUserForProgress = req.verifiedUser || await storage.getUser(assignedBy);
-          if (currentUserForProgress && currentUserForProgress.organizationId) {
-            const autoProgress = await stageProgressionService.autoProgressLead(parseInt(req.params.id), currentUserForProgress.organizationId);
-            res.json({ 
-              success: true, 
-              autoProgressed: autoProgress.progressed,
-              newStage: autoProgress.newStage 
-            });
-          } else {
-            res.json({ success: true, autoProgressed: false });
-          }
-        } catch (progressError) {
-          // Assignment succeeded but auto-progression failed - still return success
-          console.log('Auto-progression check failed:', progressError);
-          res.json({ success: true, autoProgressed: false });
-        }
-      } catch (error) {
-        console.error('Error assigning lead:', error);
-        res.status(400).json({ message: 'Failed to assign lead', error: error instanceof Error ? error.message : 'Unknown error' });
       }
-    });
+
+      // Validate analyst only if key present and not null
+      if (hasAssignedTo && assignedTo !== null) {
+        const analystUser = await storage.getUser(assignedTo);
+        if (!analystUser) return res.status(404).json({ message: "Analyst user not found" });
+        if (analystUser.role !== "analyst") return res.status(400).json({ message: "assignedTo must be an analyst user" });
+      }
+
+      // Validate partner only if key present and not null
+      if (hasAssignedPartnerId && assignedPartnerId !== null) {
+        const partnerUser = await storage.getUser(assignedPartnerId);
+        if (!partnerUser) return res.status(404).json({ message: "Partner user not found" });
+        if (partnerUser.role !== "partner") return res.status(400).json({ message: "assignedPartnerId must be a partner user" });
+      }
+
+      // undefined => keep; null => clear
+      const assignedToToSend = hasAssignedTo ? (assignedTo ?? null) : undefined;
+      const assignedPartnerToSend = hasAssignedPartnerId ? (assignedPartnerId ?? null) : undefined;
+
+      await storage.assignLead(
+        leadId,
+        organizationId,
+        assignedToToSend,
+        assignedPartnerToSend,
+        assignedBy,
+        notes
+      );
+
+      return res.json({ success: true });
+    } catch (error: any) {
+      console.error("Error assigning lead:", error);
+      return res.status(400).json({ message: "Failed to assign lead", error: error?.message || "Unknown error" });
+    }
+  }
+);
+
 
     // Assign multiple interns to a lead
     app.post('/api/leads/:id/assign-interns', authMiddleware, requireRole(['partner', 'admin']), validateResourceExists('lead'), async (req: any, res) => {
@@ -2428,6 +2419,7 @@ const updateContactSchemaOptionalLinkedIn = contactFormSchemaOptionalLinkedIn.pa
       }
     });
 
+
     // Bulk assign leads route
      app.post(
       "/api/leads/bulk-assign",
@@ -2480,7 +2472,7 @@ const updateContactSchemaOptionalLinkedIn = contactFormSchemaOptionalLinkedIn.pa
 
           for (const leadId of leadIdsNum) {
             // 1) Assign
-            await storage.assignLead(leadId, organizationId, assignedTo, assignedBy, "Bulk assignment");
+            await storage.assignLead(leadId, organizationId, assignedTo, undefined,assignedBy, "Bulk assignment");
 
             // 2) Trigger stage logic
             try {
@@ -2527,7 +2519,6 @@ const updateContactSchemaOptionalLinkedIn = contactFormSchemaOptionalLinkedIn.pa
         }
       }
     );
-
 
 
     // Hierarchical assignment endpoints for Partner→Analyst→Intern system
