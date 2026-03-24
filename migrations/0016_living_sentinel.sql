@@ -1,0 +1,1 @@
+ALTER TABLE "investors" ADD COLUMN "investor_type" varchar(100);

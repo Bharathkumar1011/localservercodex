@@ -188,15 +188,27 @@ export const leadService = {
       throw new Error('User organization not found');
     }
     
-    const { stage, defaultPocId, backupPocId } = stageData;
-    if (!stage) {
-      throw new Error('Stage is required');
-    }
-    
-    const validStages = ['universe', 'qualified', 'outreach', 'pitching', 'mandates', 'won', 'lost', 'hold','dropped', 'rejected'];
-    if (!validStages.includes(stage)) {
-      throw new Error('Invalid stage value');
-    }
+const { stage, defaultPocId, backupPocId, note } = stageData;
+if (!stage) {
+  throw new Error('Stage is required');
+}
+
+const validStages = [
+  'universe',
+  'qualified',
+  'outreach',
+  'pitching',
+  'mandates',
+  'completed_mandate',
+  'won',
+  'lost',
+  'hold',
+  'dropped',
+  'rejected'
+];
+if (!validStages.includes(stage)) {
+  throw new Error('Invalid stage value');
+}
 
     // Force rejected to go through /reject endpoint (needs reason)
     if (stage === 'rejected') {
@@ -211,46 +223,65 @@ export const leadService = {
     }
 
     // ✅ Validate transition + requirements using StageProgressionService
-    const validation = await stageProgressionService.validateStageTransition(
-      leadId,
-      currentUser.organizationId,
-      stage
-    );
-    if (!validation.isValid) {
-      throw new Error(validation.errors.join(', '));
-    }
+const normalizedNote =
+  typeof note === 'string' && note.trim().length > 0 ? note.trim() : undefined;
+
+const validation = await stageProgressionService.validateStageTransition(
+  leadId,
+  currentUser.organizationId,
+  stage,
+  normalizedNote ? { notes: normalizedNote } : {}
+);
+if (!validation.isValid) {
+  throw new Error(validation.errors.join(', '));
+}
 
     // Extra rule: moving into Pitching requires meeting + selecting POCs
+    // Pitching: allow move even without meeting and without POCs.
+    // If POCs are provided, validate they belong to the same company/org.
     const isMovingToPitching = stage === 'pitching';
     if (isMovingToPitching) {
-      const interventions = await storage.getInterventions(leadId, currentUser.organizationId);
-      const hasMeeting = interventions.some((i: any) => i.type === 'meeting');
-      if (!hasMeeting) throw new Error('Cannot move to Pitching: record a meeting intervention first');
+      // Validate default POC only if provided
+      if (defaultPocId) {
+        const defaultContact = await storage.getContact(defaultPocId, currentUser.organizationId);
+        if (!defaultContact) throw new Error('Default POC not found');
 
-      if (!defaultPocId) throw new Error('Cannot move to Pitching: Default POC must be selected');
-
-      const defaultContact = await storage.getContact(defaultPocId, currentUser.organizationId);
-      if (!defaultContact || defaultContact.companyId !== currentLead.companyId) {
-        throw new Error('Invalid Default POC: must belong to the same company');
+        if (defaultContact.companyId !== currentLead.companyId) {
+          throw new Error('Invalid Default POC: must belong to the same company');
+        }
       }
 
+      // Validate backup POC only if provided
       if (backupPocId) {
+        if (!defaultPocId) throw new Error('Backup POC requires a Default POC');
         if (backupPocId === defaultPocId) throw new Error('Backup POC must be different from Default POC');
 
         const backupContact = await storage.getContact(backupPocId, currentUser.organizationId);
-        if (!backupContact || backupContact.companyId !== currentLead.companyId) {
+        if (!backupContact) throw new Error('Backup POC not found');
+
+        if (backupContact.companyId !== currentLead.companyId) {
           throw new Error('Invalid Backup POC: must belong to the same company');
         }
       }
     }
 
+
     
-    // Build updates object with POC IDs if moving to pitching
-    const updates: any = { stage };
-    if (stage === 'pitching' && defaultPocId) {
-      updates.defaultPocId = defaultPocId;
-      updates.backupPocId = backupPocId || null;
-    }
+// Build updates object with POC IDs / note where needed
+const updates: any = { stage };
+
+if (stage === 'pitching') {
+  if (defaultPocId) updates.defaultPocId = defaultPocId;
+  if (backupPocId) updates.backupPocId = backupPocId;
+}
+
+if (stage === 'completed_mandate') {
+  if (!normalizedNote) {
+    throw new Error('Completion note is required');
+  }
+  updates.notes = normalizedNote;
+}
+
     
     const lead = await storage.updateLead(leadId, currentUser.organizationId, updates);
     
@@ -398,16 +429,8 @@ export const leadService = {
     );
 
     // ✅ keep your current auto-progress behavior
-    try {
-      const autoProgress = await stageProgressionService.autoProgressLead(leadId, orgId);
-      return {
-        success: true,
-        autoProgressed: autoProgress.progressed,
-        newStage: autoProgress.newStage
-      };
-    } catch (e) {
-      return { success: true, autoProgressed: false };
-    }
+   return { success: true };
+
   },
 
   assignInternsToLead: async (leadId: number, assignmentData: any, req: Request) => {
@@ -453,87 +476,122 @@ export const leadService = {
     }
   },
 
-  bulkAssignLeads: async (assignmentData: any, req: Request) => {
-    const { leadIds, assignedTo } = assignmentData;
-    const assignedBy = (req as any).user?.claims?.sub;
-    const organizationId = (req as any).verifiedUser?.organizationId;
-    const currentUser = (req as any).verifiedUser;
+bulkAssignLeads: async (assignmentData: any, req: Request) => {
+  const { leadIds, assignedTo } = assignmentData;
 
-    if (!currentUser || !currentUser.organizationId) {
-      throw new Error('User organization not found');
-    }
+  const currentUser =
+    (req as any).verifiedUser || await storage.getUser((req as any).user?.claims?.sub);
 
-    if (currentUser.role !== 'admin') {
-      throw new Error('Only admin can bulk assign');
-    }
+  if (!currentUser || !currentUser.organizationId) {
+    throw new Error("User organization not found");
+  }
 
-    if (!organizationId) {
-      throw new Error('User organization not found');
-    }
+  // ✅ allow admin + partner (route already allows both)
+  if (!["admin", "partner"].includes(currentUser.role)) {
+    throw new Error("Only admin or partner can bulk assign");
+  }
 
-    if (!leadIds || !Array.isArray(leadIds) || leadIds.length === 0) {
-      throw new Error('Lead IDs array is required');
-    }
+  const organizationId = currentUser.organizationId;
+  const assignedBy = currentUser.id;
 
-    if (!assignedTo) {
-      throw new Error('Assigned user is required');
-    }
+  if (!leadIds || !Array.isArray(leadIds) || leadIds.length === 0) {
+    throw new Error("Lead IDs array is required");
+  }
 
-    // Verify the user being assigned to exists and belongs to the same organization
-    const assignedUser = await storage.getUser(assignedTo);
-    if (!assignedUser) {
-      throw new Error('Assigned user not found');
-    }
+  if (!assignedTo) {
+    throw new Error("Assigned user is required");
+  }
 
-    if (Number(assignedUser.organizationId) !== Number(organizationId)) {
-      throw new Error('Cannot assign leads to users outside your organization');
-    }
+  // ✅ Normalize leadIds (frontend can send strings)
+  const leadIdsNum = leadIds
+    .map((id: any) => Number(id))
+    .filter((n: number) => Number.isFinite(n));
 
-    // Verify all leads exist and belong to the organization
-    for (const leadId of leadIds) {
-      const lead = await storage.getLead(leadId, organizationId);
-      if (!lead) {
-        throw new Error(`Lead ${leadId} not found`);
+  if (leadIdsNum.length !== leadIds.length) {
+    throw new Error("Invalid leadIds: must be numbers");
+  }
+
+  // Verify assignee exists + org match
+  const assignedUser = await storage.getUser(assignedTo);
+  if (!assignedUser) throw new Error("Assigned user not found");
+
+  if (Number(assignedUser.organizationId) !== Number(organizationId)) {
+    throw new Error("Cannot assign leads to users outside your organization");
+  }
+
+  const isAnalystAssignee = assignedUser.role === "analyst";
+  const isPartnerAssignee = assignedUser.role === "partner";
+
+  if (!isAnalystAssignee && !isPartnerAssignee) {
+    throw new Error("Assigned user must be an analyst or partner");
+  }
+
+  // ✅ Partner can bulk-assign only their own leads
+  // (Admin bypasses this)
+  for (const leadId of leadIdsNum) {
+    const lead = await storage.getLead(leadId, organizationId);
+    if (!lead) throw new Error(`Lead ${leadId} not found`);
+
+    if (currentUser.role === "partner") {
+      const partnerId = (lead as any).assignedPartnerId;
+      if (!partnerId || partnerId !== currentUser.id) {
+        throw new Error(`Access denied for lead ${leadId}`);
       }
     }
+  }
 
-    // Perform bulk assignment (preserve assignedPartnerId)
+  let autoQualifiedCount = 0;
 
-    for (const leadId of leadIds) {
-      const lead = await storage.getLead(leadId, organizationId);
-      if (!lead) {
-        throw new Error(`Lead ${leadId} not found`);
-      }
-
-      // ✅ If partner is doing bulk assign, allow only for leads assigned to that partner
-      if (currentUser.role === 'partner') {
-        const partnerId = (lead as any).assignedPartnerId;
-        if (!partnerId || partnerId !== currentUser.id) {
-          throw new Error(`Access denied for lead ${leadId}`);
-        }
-      }
-
-      // ✅ Preserve partner assignment (do NOT change it during bulk assign)
-      const partnerIdToSave = (lead as any).assignedPartnerId ?? null;
-
-      // ✅ NEW storage signature: pass assignedPartnerId also
+  for (const leadId of leadIdsNum) {
+    if (isAnalystAssignee) {
+      // ✅ Assign to analyst (assignedTo)
       await storage.assignLead(
         leadId,
         organizationId,
-        assignedTo,
-        undefined, 
+        assignedTo,   // analyst id
+        undefined,    // don't touch assignedPartnerId
         assignedBy,
-        'Bulk assignment'
+        "Bulk assignment"
       );
+
+      // ✅ auto progression only when analyst assigned
+      try {
+        await stageProgressionService.autoProgressLead(leadId, organizationId);
+      } catch (e) {
+        console.error(`Auto-progression failed for lead ${leadId}:`, e);
+      }
+
+      // ✅ fallback Universe -> Qualified
+      const updatedLead = await storage.getLead(leadId, organizationId);
+      if (updatedLead && updatedLead.stage === "universe") {
+        await storage.updateLead(leadId, organizationId, { stage: "qualified" });
+      }
+
+      const finalLead = await storage.getLead(leadId, organizationId);
+      if (finalLead?.stage === "qualified") autoQualifiedCount++;
+    } else {
+      // ✅ Assign to partner (assignedPartnerId)
+      await storage.assignLead(
+        leadId,
+        organizationId,
+        undefined,   // IMPORTANT: do NOT set assignedTo
+        assignedTo,  // partner id goes here
+        assignedBy,
+        "Bulk assignment"
+      );
+
+      // ❌ do NOT auto-progress / do NOT force Universe->Qualified for partner assignment
     }
+  }
 
+  return {
+    success: true,
+    message: `Successfully assigned ${leadIdsNum.length} leads to ${assignedUser.firstName} ${assignedUser.lastName}`,
+    assignedCount: leadIdsNum.length,
+    autoQualifiedCount,
+  };
+},
 
-    return { 
-      success: true, 
-      message: `Successfully assigned ${leadIds.length} leads to ${assignedUser.firstName} ${assignedUser.lastName}`,
-      assignedCount: leadIds.length 
-    };
-  },
 
   assignInternToLead: async (leadId: number, assignmentData: any, req: Request) => {
     const currentUser = (req as any).verifiedUser || await storage.getUser((req as any).user?.claims?.sub);

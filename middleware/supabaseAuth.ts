@@ -38,7 +38,10 @@ export async function requireSupabaseAuth(req: Request, res: Response, next: Nex
     }
 
     const { data, error } = await supabaseAdmin.auth.getUser(token);
+    
     if (error || !data.user) {
+      // 🚨 ADD THIS CONSOLE.LOG TO SEE THE REAL ERROR 🚨
+      console.error('Supabase Auth Reject Reason:', error?.message || error);
       return res.status(401).json({ message: 'Invalid or expired Supabase token' });
     }
 

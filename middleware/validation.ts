@@ -63,7 +63,20 @@ export const validateResourceExists = (resourceType: 'lead' | 'company' | 'conta
 };
 
 // Valid stage validation
-const validStages = ['universe', 'qualified', 'outreach', 'pitching', 'mandates','won','lost', 'hold','dropped', 'rejected'];
+const validStages = [
+  'universe',
+  'qualified',
+  'outreach',
+  'pitching',
+  'mandates',
+  'completed_mandate',
+  'won',
+  'lost',
+  'hold',
+  'dropped',
+  'rejected',
+];
+
 export const validateStage = (req: Request, res: Response, next: NextFunction) => {
   if (!validStages.includes((req.params as any).stage)) {
     return res.status(400).json({ message: 'Invalid stage' });

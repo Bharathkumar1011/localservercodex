@@ -99,6 +99,23 @@ export const leadController = {
   updateLeadStage: async (req: Request, res: Response) => {
     try {
       const lead = await leadService.updateLeadStage(parseInt(req.params.id), req.body, req);
+      // ✅ Log the stage change so it appears on the Daily Activity Widget
+      const currentUser = (req as any).verifiedUser;
+      if (lead && currentUser) {
+        import('../storage.js').then(({ storage }) => {
+          storage.createActivityLog({
+            organizationId: currentUser.organizationId,
+            leadId: lead.id,
+            userId: currentUser.id,
+            action: 'stage_changed',
+            entityType: 'lead',
+            entityId: lead.id,
+            oldValue: (req as any).resource?.stage || 'unknown', // Assumes middleware attaches old resource
+            newValue: req.body.stage,
+            description: `Stage moved to ${req.body.stage}`
+          }).catch(console.error);
+        });
+      }
       res.json(lead);
     } catch (error) {
       console.error('Error updating lead stage:', error);

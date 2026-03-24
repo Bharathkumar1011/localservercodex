@@ -1,0 +1,1 @@
+ALTER TABLE "news_feed" ADD COLUMN "category" text DEFAULT 'leads' NOT NULL;

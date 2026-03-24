@@ -1,0 +1,1 @@
+ALTER TABLE "companies" ADD COLUMN "channel_partner" varchar(255);

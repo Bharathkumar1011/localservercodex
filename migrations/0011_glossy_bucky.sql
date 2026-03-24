@@ -1,0 +1,1 @@
+ALTER TABLE "investor_lead_links" ADD COLUMN "status" varchar(50) DEFAULT 'yet_to_contact';
