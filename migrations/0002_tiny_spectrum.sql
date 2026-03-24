@@ -1,0 +1,1 @@
+ALTER TABLE "interventions" ADD COLUMN "status" varchar(20) DEFAULT 'pending' NOT NULL;

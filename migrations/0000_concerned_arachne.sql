@@ -1,4 +1,4 @@
-CREATE TABLE "activity_log" (
+/*CREATE TABLE "activity_log" (
 	"id" serial PRIMARY KEY NOT NULL,
 	"organization_id" integer NOT NULL,
 	"lead_id" serial NOT NULL,
@@ -232,4 +232,4 @@ ALTER TABLE "outreach_activities" ADD CONSTRAINT "outreach_activities_user_id_us
 ALTER TABLE "users" ADD CONSTRAINT "users_organization_id_organizations_id_fk" FOREIGN KEY ("organization_id") REFERENCES "public"."organizations"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "users" ADD CONSTRAINT "users_manager_id_users_id_fk" FOREIGN KEY ("manager_id") REFERENCES "public"."users"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "users" ADD CONSTRAINT "users_analyst_id_users_id_fk" FOREIGN KEY ("analyst_id") REFERENCES "public"."users"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
-CREATE INDEX "IDX_session_expire" ON "sessions" USING btree ("expire");
+CREATE INDEX "IDX_session_expire" ON "sessions" USING btree ("expire");*/

@@ -12,9 +12,11 @@ import {
   serial,
   integer,
   unique,
+  uniqueIndex,
 } from "drizzle-orm/pg-core";
 import { createInsertSchema } from 'drizzle-zod';
 import { z } from 'zod';
+
 
 // Session storage table.
 // (IMPORTANT) This table is mandatory for Replit Auth, don't drop it.
@@ -49,8 +51,14 @@ export const users = pgTable("users", {
   profileImageUrl: varchar("profile_image_url"),
   role: varchar("role", { length: 20 }).notNull().default('analyst'), // analyst, partner, admin, intern
   isSuspended: boolean("is_suspended").notNull().default(false),
-  managerId: varchar("manager_id").references((): any => users.id), // For analysts: their partner
+  partnerId: varchar("manager_id").references((): any => users.id), // For analysts: their partner
   analystId: varchar("analyst_id").references((): any => users.id), // For interns: their analyst
+
+  lastLoginTime: timestamp("last_login_time"), // Tracks last login time for session management and security monitoring
+
+  lastActionTime: timestamp("last_action_time"), // Tracks last action time for inactivity-based auto-logout
+
+
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
 });
@@ -100,6 +108,7 @@ export const companies = pgTable("companies", {
   // Legacy fields (keeping for backward compatibility)
   industry: varchar("industry", { length: 100 }),
   website: varchar("website", { length: 255 }),
+  channelPartner: varchar("channel_partner", { length: 255 }), // ✅ NEW FIELD
   description: text("description"),
   
   createdAt: timestamp("created_at").defaultNow(),
@@ -131,11 +140,16 @@ export const leads = pgTable("leads", {
   stage: varchar("stage", { length: 20 }).notNull().default('universe'), // universe, qualified, outreach, pitching, mandates, won, lost, rejected
   universeStatus: varchar("universe_status", { length: 20 }).default('open'), // open, assigned - sub-states within universe
   ownerAnalystId: varchar("owner_analyst_id").references(() => users.id), // Analyst who owns/created this lead
+   createdBy: varchar("created_by").references(() => users.id).notNull(), // User who created this lead
   assignedTo: varchar("assigned_to").references(() => users.id), // Deprecated: Use assignedInterns instead
+  assignedPartnerId: varchar("assigned_partner_id").references(() => users.id), // Partner assigned to this lead
   assignedInterns: text("assigned_interns").array(), // Array of intern user IDs assigned to this lead
   pipelineValue: decimal("pipeline_value", { precision: 15, scale: 2 }),
   probability: decimal("probability", { precision: 5, scale: 2 }).default('0'), // 0-100
   notes: text("notes"),
+  leadSource: varchar("lead_source", { length: 50 }),
+  chatgptLink: text("chatgpt_link"), // ✅ New field for Drive/ChatGPT URL
+  leadTemperature: varchar("lead_temperature", { length: 20 }), // null = Not set, warm, hot
   // createdBy: varchar("created_by", { length: 50 }).notNull(), // User who created this lead
   // POC summary fields for quick status checking
   pocCount: integer("poc_count").default(0), // Number of contacts for this lead
@@ -200,6 +214,78 @@ export const outreachActivities = pgTable("outreach_activities", {
   updatedAt: timestamp("updated_at").defaultNow(),
 });
 
+// Lead POC outreach status - tracks outreach status for each contact (POC) of a lead, for each channel (LinkedIn, email, WhatsApp)
+export const leadPocOutreachStatus = pgTable(
+  "lead_poc_outreach_status",
+  {
+    id: serial("id").primaryKey(),
+    organizationId: integer("organization_id")
+      .references(() => organizations.id)
+      .notNull(),
+    leadId: integer("lead_id")
+      .references(() => leads.id)
+      .notNull(),
+    contactId: integer("contact_id")
+      .references(() => contacts.id)
+      .notNull(),
+
+    channel: varchar("channel", { length: 20 }).notNull(), // linkedin, email, whatsapp
+    status: varchar("status", { length: 50 }), // initiated, 1st_follow_up, etc.
+
+    initiatedAt: timestamp("initiated_at"),
+    lastUpdatedAt: timestamp("last_updated_at").defaultNow().notNull(),
+
+    remarks: text("remarks"),
+
+    nextActionText: text("next_action_text"),
+    nextActionAt: timestamp("next_action_at"),
+
+    cadenceTriggeredAt: timestamp("cadence_triggered_at"),
+
+    createdBy: varchar("created_by")
+      .references(() => users.id)
+      .notNull(),
+
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at").defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex("lead_poc_outreach_status_unique_idx").on(
+      table.organizationId,
+      table.leadId,
+      table.contactId,
+      table.channel
+    ),
+    index("lead_poc_outreach_status_lead_idx").on(
+      table.organizationId,
+      table.leadId
+    ),
+    index("lead_poc_outreach_status_contact_idx").on(
+      table.organizationId,
+      table.contactId
+    ),
+  ]
+);
+
+
+// ✅ Investor Outreach Activities
+
+export const investorOutreachActivities = pgTable("investor_outreach_activities", {
+  id: serial("id").primaryKey(),
+  organizationId: integer("organization_id").notNull(),
+  investorId: integer("investor_id").notNull(),
+
+  activityType: varchar("activity_type", { length: 80 }).notNull(),
+  status: varchar("status", { length: 30 }).notNull().default("pending"),
+
+  contactDate: timestamp("contact_date"),
+  followUpDate: timestamp("follow_up_date"),
+  notes: text("notes"),
+
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+
 // Interventions table for tracking outreach activities during outreach stage
 export const interventions = pgTable("interventions", {
   id: serial("id").primaryKey(),
@@ -210,7 +296,9 @@ export const interventions = pgTable("interventions", {
   scheduledAt: timestamp("scheduled_at").notNull(), // When intervention was scheduled/performed
   notes: text("notes"),
   documentName: varchar("document_name", { length: 100 }), // For document type: PDM, MTS, LOE (Letter of Engagement), Contract
+  status: varchar("status", { length: 20 }).notNull().default('pending'), // pending, completed
   createdAt: timestamp("created_at").defaultNow(),
+  meetingMode: varchar("meeting_mode", { length: 20 }), // NEW
 });
 
 // Activity log for comprehensive audit trail
@@ -264,6 +352,175 @@ export const dealOutcomes = pgTable("deal_outcomes", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
+// ==============================
+// INVESTOR RELATION (ADMIN ONLY)
+// ==============================
+
+// Investors table
+export const investors = pgTable("investors", {
+  id: serial("id").primaryKey(),
+  organizationId: integer("organization_id").references(() => organizations.id).notNull(),
+
+  createdByUserId: varchar("created_by_user_id").references(() => users.id),
+
+  name: varchar("name", { length: 255 }).notNull(),
+  // Changed to text to support multiple comma-separated sectors
+
+  // ✅ ADD THIS LINE:
+  investorType: varchar("investor_type", { length: 100 }),
+
+  sector: text("sector"),
+  location: varchar("location", { length: 255 }),
+  website: varchar("website", { length: 255 }),
+  description: text("description"),
+
+  // outreach | warm | active | dealmaking
+  stage: varchar("stage", { length: 20 }).notNull().default("outreach"),
+
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+// Investor Contacts table (Primary POC now, multiple later)
+export const investorContacts = pgTable("investor_contacts", {
+  id: serial("id").primaryKey(),
+  organizationId: integer("organization_id").references(() => organizations.id).notNull(),
+  investorId: integer("investor_id").references(() => investors.id).notNull(),
+
+  name: varchar("name", { length: 255 }),
+  designation: varchar("designation", { length: 255 }),
+  email: varchar("email", { length: 255 }),
+  phone: varchar("phone", { length: 50 }),
+  linkedinProfile: varchar("linkedin_profile", { length: 500 }),
+
+  isPrimary: boolean("is_primary").notNull().default(true),
+
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+// investor data linked comapnies 
+export const investorLeadLinks = pgTable(
+  "investor_lead_links",
+  {
+    id: serial("id").primaryKey(),
+    organizationId: integer("organization_id")
+      .references(() => organizations.id)
+      .notNull(),
+
+    investorId: integer("investor_id")
+      .references(() => investors.id)
+      .notNull(),
+
+    leadId: integer("lead_id")
+      .references(() => leads.id) // ✅ uses your existing leads table
+      .notNull(),
+
+    // NEW: Status column for the dropdown
+    status: varchar("status", { length: 50 }).default('yet_to_contact'),
+
+    selectedContactIds: integer("selected_contact_ids").array(), // ✅ New Column
+
+    remarks: text("remarks"), // For any additional notes on this investor-lead link
+
+    createdAt: timestamp("created_at").defaultNow(),
+
+
+  },
+  (t) => ({
+    uniq: uniqueIndex("uniq_investor_lead_link").on(t.organizationId, t.investorId, t.leadId),
+  })
+);
+
+
+// Investor POC outreach status - lead-linked investor outreach matrix
+export const investorPocOutreachStatus = pgTable(
+  "investor_poc_outreach_status",
+  {
+    id: serial("id").primaryKey(),
+
+    organizationId: integer("organization_id")
+      .references(() => organizations.id)
+      .notNull(),
+
+    leadId: integer("lead_id")
+      .references(() => leads.id)
+      .notNull(),
+
+    investorId: integer("investor_id")
+      .references(() => investors.id)
+      .notNull(),
+
+    contactId: integer("contact_id")
+      .references(() => investorContacts.id)
+      .notNull(),
+
+    channel: varchar("channel", { length: 20 }).notNull(), // linkedin, email, whatsapp, call, channel_partner
+    status: varchar("status", { length: 50 }), // initiated, 1st_follow_up, etc.
+
+    initiatedAt: timestamp("initiated_at"),
+    lastUpdatedAt: timestamp("last_updated_at").defaultNow().notNull(),
+
+    remarks: text("remarks"),
+    cadenceTriggeredAt: timestamp("cadence_triggered_at"),
+
+    createdBy: varchar("created_by")
+      .references(() => users.id)
+      .notNull(),
+
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at").defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex("investor_poc_outreach_status_unique_idx").on(
+      table.organizationId,
+      table.leadId,
+      table.investorId,
+      table.contactId,
+      table.channel
+    ),
+    index("investor_poc_outreach_status_lead_idx").on(
+      table.organizationId,
+      table.leadId,
+      table.investorId
+    ),
+    index("investor_poc_outreach_status_contact_idx").on(
+      table.organizationId,
+      table.contactId
+    ),
+  ]
+);
+
+// ✅ NEW: Investor sandbox access
+// Condition B support even if investor already existed (dedup merge)
+// Any analyst who created OR imported an investor gets access via this table.
+export const investorUserAccess = pgTable(
+  "investor_user_access",
+  {
+    id: serial("id").primaryKey(),
+    organizationId: integer("organization_id")
+      .references(() => organizations.id)
+      .notNull(),
+
+    investorId: integer("investor_id")
+      .references(() => investors.id)
+      .notNull(),
+
+    userId: varchar("user_id")
+      .references(() => users.id)
+      .notNull(),
+
+    // "create" | "import"
+    source: varchar("source", { length: 20 }).notNull().default("create"),
+
+    createdAt: timestamp("created_at").defaultNow(),
+  },
+  (t) => ({
+    uniq: uniqueIndex("uniq_investor_user_access").on(t.organizationId, t.investorId, t.userId),
+  })
+);
+
+
 // Type exports
 export type Organization = typeof organizations.$inferSelect;
 export type UpsertOrganization = typeof organizations.$inferInsert;
@@ -279,6 +536,10 @@ export type LeadAssignment = typeof leadAssignments.$inferSelect;
 export type UpsertLeadAssignment = typeof leadAssignments.$inferInsert;
 export type OutreachActivity = typeof outreachActivities.$inferSelect;
 export type UpsertOutreachActivity = typeof outreachActivities.$inferInsert;
+export type LeadPocOutreachStatus = typeof leadPocOutreachStatus.$inferSelect;
+export type UpsertLeadPocOutreachStatus = typeof leadPocOutreachStatus.$inferInsert;
+export type InvestorPocOutreachStatus = typeof investorPocOutreachStatus.$inferSelect;
+export type UpsertInvestorPocOutreachStatus = typeof investorPocOutreachStatus.$inferInsert;
 export type Intervention = typeof interventions.$inferSelect;
 export type UpsertIntervention = typeof interventions.$inferInsert;
 export type ActivityLog = typeof activityLog.$inferSelect;
@@ -287,6 +548,85 @@ export type Invitation = typeof invitations.$inferSelect;
 export type UpsertInvitation = typeof invitations.$inferInsert;
 export type DealOutcome = typeof dealOutcomes.$inferSelect;
 export type UpsertDealOutcome = typeof dealOutcomes.$inferInsert;
+// investor schema
+export type Investor = typeof investors.$inferSelect;
+export type UpsertInvestor = typeof investors.$inferInsert;
+
+export type InvestorContact = typeof investorContacts.$inferSelect;
+export type UpsertInvestorContact = typeof investorContacts.$inferInsert;
+
+
+
+// News Feed table
+export const newsFeed = pgTable("news_feed", {
+  id: serial("id").primaryKey(),
+  organizationId: integer("organization_id").references(() => organizations.id).notNull(),
+  title: varchar("title", { length: 255 }).notNull(),
+  url: text("url").notNull(),
+  source: varchar("source", { length: 100 }), // e.g., "VCCircle", "TechCrunch"
+  category: text("category").notNull().default("leads"), // 'leads' or 'investors'
+  publishedAt: timestamp("published_at").defaultNow(),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export type NewsFeedItem = typeof newsFeed.$inferSelect;
+export type InsertNewsFeedItem = typeof newsFeed.$inferInsert;
+
+export const insertNewsFeedSchema = createInsertSchema(newsFeed).omit({ 
+  id: true, 
+  organizationId: true, // Server-controlled
+  createdAt: true 
+});
+
+
+// Investor Events / Conferences table
+export const investorEvents = pgTable(
+  "investor_events",
+  {
+    id: serial("id").primaryKey(),
+    organizationId: integer("organization_id")
+      .references(() => organizations.id)
+      .notNull(),
+
+    title: varchar("title", { length: 255 }).notNull(),
+    url: text("url").notNull(),
+    source: varchar("source", { length: 150 }),
+    sourceType: varchar("source_type", { length: 40 }).default("google_news"),
+
+    eventDate: timestamp("event_date"),
+    publishedAt: timestamp("published_at").defaultNow(),
+
+    city: varchar("city", { length: 120 }),
+    locationText: varchar("location_text", { length: 255 }),
+    organizer: varchar("organizer", { length: 255 }),
+
+    priorityScore: integer("priority_score").default(0),
+    isHyderabadPriority: boolean("is_hyderabad_priority").notNull().default(false),
+
+    matchedInvestorType: varchar("matched_investor_type", { length: 100 }),
+    matchedSectors: jsonb("matched_sectors").$type<string[]>().default(sql`'[]'::jsonb`),
+    matchedKeywords: jsonb("matched_keywords").$type<string[]>().default(sql`'[]'::jsonb`),
+
+    createdAt: timestamp("created_at").defaultNow(),
+    updatedAt: timestamp("updated_at").defaultNow(),
+  },
+  (table) => ({
+    orgIdx: index("investor_events_org_idx").on(table.organizationId),
+    eventDateIdx: index("investor_events_event_date_idx").on(table.eventDate),
+    cityIdx: index("investor_events_city_idx").on(table.city),
+  })
+);
+
+export type InvestorEvent = typeof investorEvents.$inferSelect;
+export type InsertInvestorEvent = typeof investorEvents.$inferInsert;
+
+export const insertInvestorEventSchema = createInsertSchema(investorEvents).omit({
+  id: true,
+  organizationId: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
 
 // Zod schemas for validation
 export const insertOrganizationSchema = createInsertSchema(organizations).omit({ id: true, createdAt: true, updatedAt: true });
@@ -314,11 +654,23 @@ export const insertLeadSchema = createInsertSchema(leads).omit({
   organizationId: true, // Security: Server assigns organizationId, never client-controlled
   createdAt: true, 
   updatedAt: true, 
-  stageUpdatedAt: true 
+  stageUpdatedAt: true, 
+  createdBy: true, // ⭐ Server will set createdBy = current user
 });
 export const updateLeadSchema = insertLeadSchema.partial();
 export const insertLeadAssignmentSchema = createInsertSchema(leadAssignments).omit({ id: true, assignedAt: true });
 export const insertOutreachActivitySchema = createInsertSchema(outreachActivities).omit({ id: true, createdAt: true, updatedAt: true });
+// Lead POC outreach status schema - organizationId is server-controlled, never client-provided
+export const insertLeadPocOutreachStatusSchema = createInsertSchema(leadPocOutreachStatus).omit({
+  id: true,
+  organizationId: true,
+  createdBy: true,
+  createdAt: true,
+  updatedAt: true,
+  lastUpdatedAt: true,
+  cadenceTriggeredAt: true,
+});
+
 // New table schemas
 export const insertInterventionSchema = createInsertSchema(interventions).omit({ 
   id: true, 
@@ -341,13 +693,47 @@ export const insertDealOutcomeSchema = createInsertSchema(dealOutcomes).omit({
   organizationId: true, 
   createdAt: true 
 });
+// invetor schema
+export const insertInvestorSchema = createInsertSchema(investors).omit({
+  id: true,
+  organizationId: true,
+  createdByUserId: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+
+
+
+export const updateInvestorSchema = insertInvestorSchema.partial();
+
+export const insertInvestorContactSchema = createInsertSchema(investorContacts).omit({
+  id: true,
+  organizationId: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
 
 // Form validation schemas
 export const contactFormSchema = insertContactSchema.extend({
   name: z.string().min(1, "Name is required"),
   designation: z.string().min(1, "Designation is required"),
-  linkedinProfile: z.string().url("LinkedIn profile must be a valid URL").min(1, "LinkedIn profile is required")
+
+  // ✅ LinkedIn is OPTIONAL now
+  linkedinProfile: z
+    .string()
+    .optional()
+    .nullable()
+    .transform((v) => {
+      const s = (v ?? "").toString().trim();
+      return s.length ? s : null; // empty string -> null
+    })
+    .refine((v) => !v || v.includes("linkedin.com"), {
+      message: "Please enter a valid LinkedIn URL",
+    }),
 });
+
 
 // Individual lead creation form schema
 export const individualLeadFormSchema = z.object({
@@ -364,10 +750,12 @@ export const individualLeadFormSchema = z.object({
 });
 
 // Intervention form schema for outreach stage
+// For manual form: we keep enum for type
 export const interventionFormSchema = insertInterventionSchema.extend({
-  type: z.enum(["linkedin_message", "call", "whatsapp", "email", "meeting"]),
+  type: z.enum(["linkedin_message", "call", "whatsapp", "email", "meeting", "document"]),
   scheduledAt: z.date(),
   notes: z.string().min(1, "Notes are required"),
+  status: z.enum(["pending", "completed"]).default("pending"),
 });
 
 // Deal outcome form schema for pitching stage
@@ -396,7 +784,7 @@ export const invitationFormSchema = z.object({
   role: z.enum(['analyst', 'manager', 'admin', 'intern'], {
     required_error: "Please select a role",
   }),
-  managerId: z.string().optional(), // For analysts: assign to a manager
+  partnerId: z.string().optional(), // For analysts: assign to a manager
   analystId: z.string().optional(), // For interns: assign to an analyst
 }).refine(data => {
   // For interns, analystId is required
@@ -420,6 +808,7 @@ export type InsertLeadData = z.infer<typeof insertLeadSchema>;
 export type UpdateLeadData = z.infer<typeof updateLeadSchema>;
 export type InsertLeadAssignmentData = z.infer<typeof insertLeadAssignmentSchema>;
 export type InsertOutreachActivityData = z.infer<typeof insertOutreachActivitySchema>;
+export type InsertLeadPocOutreachStatusData = z.infer<typeof insertLeadPocOutreachStatusSchema>;
 // New form data types
 export type IndividualLeadFormData = z.infer<typeof individualLeadFormSchema>;
 export type InterventionFormData = z.infer<typeof interventionFormSchema>;
@@ -430,3 +819,165 @@ export type InsertInterventionData = z.infer<typeof insertInterventionSchema>;
 export type InsertActivityLogData = z.infer<typeof insertActivityLogSchema>;
 export type InsertInvitationData = z.infer<typeof insertInvitationSchema>;
 export type InsertDealOutcomeData = z.infer<typeof insertDealOutcomeSchema>;
+// investor schema 
+export type InsertInvestorData = z.infer<typeof insertInvestorSchema>;
+export type UpdateInvestorData = z.infer<typeof updateInvestorSchema>;
+export type InsertInvestorContactData = z.infer<typeof insertInvestorContactSchema>;
+
+// ✅ NEW TABLE: Pitching Details
+export const pitchingDetails = pgTable("pitching_details", {
+  id: serial("id").primaryKey(),
+  leadId: integer("lead_id").notNull().references(() => leads.id),
+  
+  // 1. G-Drive
+  gdriveLink: text("gdrive_link"),
+  
+  // 2. Files (Paths to stored files)
+  solutionNotePath: text("solution_note_path"),
+  solutionNoteName: text("solution_note_name"),
+  pdmPath: text("pdm_path"),
+  pdmName: text("pdm_name"),
+
+  // 3. Meeting 1
+  meeting1Date: timestamp("meeting1_date"),
+  meeting1Notes: text("meeting1_notes"),
+
+  // 4. Meeting 2
+  meeting2Date: timestamp("meeting2_date"),
+  meeting2Notes: text("meeting2_notes"),
+
+  // 5. LOE
+  loeSigned: boolean("loe_signed").default(false),
+
+  // 6. Investor Check
+  investorCheckNotes: text("investor_check_notes"),
+
+  // 7. Mandate
+  mandateSigned: boolean("mandate_signed").default(false),
+
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+export const insertPitchingDetailsSchema = createInsertSchema(pitchingDetails);
+export type PitchingDetail = typeof pitchingDetails.$inferSelect;
+export type InsertPitchingDetail = typeof pitchingDetails.$inferInsert;
+
+
+// ✅ NEW TABLE: Lead Card Solution Notes (separate from Pitching)
+export const leadSolutionNotes = pgTable(
+  "lead_solution_notes",
+  {
+    id: serial("id").primaryKey(),
+    organizationId: integer("organization_id")
+      .references(() => organizations.id)
+      .notNull(),
+    leadId: integer("lead_id")
+      .references(() => leads.id)
+      .notNull(),
+
+    pdfPath: text("pdf_path"),
+    pdfName: text("pdf_name"),
+
+    links: jsonb("links")
+      .$type<string[]>()
+      .notNull()
+      .default(sql`'[]'::jsonb`),
+
+    createdAt: timestamp("created_at").defaultNow(),
+    updatedAt: timestamp("updated_at").defaultNow(),
+  },
+  (t) => [
+    unique("uq_lead_solution_notes_org_lead").on(t.organizationId, t.leadId),
+  ]
+);
+
+export const insertLeadSolutionNoteSchema = createInsertSchema(leadSolutionNotes);
+export type LeadSolutionNote = typeof leadSolutionNotes.$inferSelect;
+export type InsertLeadSolutionNote = typeof leadSolutionNotes.$inferInsert;
+
+
+
+// ==========================================
+// EPN (EXTERNAL PARTNER NETWORK) SCHEMA
+// ==========================================
+
+// 1) EPN Partners Table
+export const epnPartners = pgTable("epn_partners", {
+  id: serial("id").primaryKey(),
+  organizationId: integer("organization_id")
+    .references(() => organizations.id)
+    .notNull(),
+
+  // "External Partner" column
+  name: text("name").notNull(),
+
+  // Sidebar bucket (maps to your menu structure)
+  // Values: 'idfc', 'other_channel_partner', 'other_epn'
+  bucket: text("bucket").notNull().default("other_epn"),
+
+  // Category dropdown (user-selected)
+  // Values like: 'channel_partner', 'agency', 'sector_expert', 'loan', 'law_firm', 'ca_firm'
+  category: text("category"),
+
+  // Stage (workflow)
+  // Values: 'outreach', 'active', 'rainmaking'
+  stage: text("stage").notNull().default("outreach"),
+
+    // New fields for Add EPN details
+  pocName: text("poc_name"),
+  designation: text("designation"),
+  phoneNumber: text("phone_number"),
+  email: text("email"),
+  linkedin: text("linkedin"),
+  zone: text("zone"),
+  city: text("city"),
+  state: text("state"),
+
+  
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+// 2) EPN ↔ Lead Links (for "Linked Companies" column later)
+export const epnLeadLinks = pgTable(
+  "epn_lead_links",
+  {
+    id: serial("id").primaryKey(),
+    organizationId: integer("organization_id")
+      .references(() => organizations.id)
+      .notNull(),
+
+    epnId: integer("epn_id")
+      .notNull()
+      .references(() => epnPartners.id),
+
+    leadId: integer("lead_id")
+      .notNull()
+      .references(() => leads.id),
+
+      // ✅ NEW: Added for Investor-Outreach style table
+    status: varchar("status", { length: 50 }).default('yet_to_contact'),
+    remarks: text("remarks"),
+
+    createdAt: timestamp("created_at").defaultNow(),
+  },
+  (t) => [
+    // Prevent duplicates (same lead linked twice to same partner in same org)
+    unique("uq_epn_lead_link").on(t.organizationId, t.epnId, t.leadId),
+  ]
+);
+
+// Zod Schemas for API validation
+export const insertEpnPartnerSchema = createInsertSchema(epnPartners).omit({
+  id: true,
+  organizationId: true, // always set server-side
+  createdAt: true,
+  updatedAt: true,
+});
+
+export const updateEpnStageSchema = z.object({
+  stage: z.enum(["outreach", "active", "rainmaking"]),
+});
+
+export type EpnPartner = typeof epnPartners.$inferSelect;
+export type InsertEpnPartner = z.infer<typeof insertEpnPartnerSchema>;

@@ -22,4 +22,8 @@ router.delete('/:id', requireRole(['admin']), userController.deleteUser);
 // Transfer all leads from one user to another - admin/partner
 router.post('/:fromUserId/transfer-leads', requireRole(['partner', 'admin']), userController.transferLeads);
 
+// Transfer lead ownership - admin/partner
+router.post('/transfer-ownership', requireRole(['partner', 'admin']), userController.transferOwnership);
+
+
 export { router as userRoutes };

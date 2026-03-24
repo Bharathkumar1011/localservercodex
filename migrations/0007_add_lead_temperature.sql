@@ -1,0 +1,1 @@
+ALTER TABLE "leads" ADD COLUMN "lead_temperature" varchar(20);

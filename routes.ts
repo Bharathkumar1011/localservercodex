@@ -1,26 +1,71 @@
 // Integration: javascript_log_in_with_replit
 import type { Express } from "express";
 import { createServer, type Server } from "http";
-import { storage } from "./storage";
-import { StageProgressionService } from "./stageProgressionService";
-import ActivityLogService from "./activityLogService";
+import { storage } from "./storage.js";
+import { StageProgressionService } from "./stageProgressionService.js";
+import ActivityLogService from "./activityLogService.js";
 import { randomUUID } from 'crypto';
-import { emailService } from './smtpEmailService';
+import { emailService } from './smtpEmailService.js';
 import { z } from 'zod';
 import session from 'express-session';
+import { and, eq, inArray, asc } from "drizzle-orm";
+import { contacts } from "./shared/schema.js";
 
-import { db } from "./db";
-import { leads } from "./shared/schema";
+
+import { db } from "./db.js";
+import { leads } from "./shared/schema.js";
 // Import route modules
 import { userRoutes } from './routes/userRoutes.js';
 import { companyRoutes } from './routes/companyRoutes.js';
 import { leadRoutes } from './routes/leadRoutes.js';
 import { contactRoutes } from './routes/contactRoutes.js';
 
+import { epnRoutes } from './routes/epnRoutes.js'; // NEW EPN routes
+
+import { leadSolutionNoteRoutes } from './routes/lead-solution-note/leadSolutionNoteRoutes.js';
+ 
+import { investorEventsRoutes } from './routes/investorEventsRoutes.js';
+
+
+import { insertNewsFeedSchema , newsFeed} from "./shared/schema.js";
+
+
 // Import middleware
 import { requireRole } from './middleware/auth.js';
 import { requireSupabaseAuth } from './middleware/supabaseAuth.js';
 
+import { parse } from "csv-parse/sync";
+import multer from "multer";
+
+import path from "path";
+import fs from "fs";
+
+import { createRequire } from "module";
+const require = createRequire(import.meta.url);
+
+// pdf-parse compatibility (v1 and v2)
+const pdfParsePkg: any = require("pdf-parse");
+const PDFParseClass: any =
+  pdfParsePkg?.PDFParse ??
+  pdfParsePkg?.default?.PDFParse ??
+  null;
+async function extractPdfText(buffer: Buffer): Promise<string> {
+  // ✅ v1 compatibility: const pdf = require("pdf-parse"); await pdf(buffer)
+  if (typeof pdfParsePkg === "function") {
+    const r = await pdfParsePkg(buffer);
+    return r?.text || "";
+  }
+
+  // ✅ v2+: const { PDFParse } = require("pdf-parse"); new PDFParse({ data: buffer })
+  if (typeof PDFParseClass === "function") {
+    const parser = new PDFParseClass({ data: buffer });
+    const r = await parser.getText();
+    if (typeof parser.destroy === "function") await parser.destroy();
+    return r?.text || "";
+  }
+
+  throw new Error("pdf-parse export not supported (expected function or PDFParse class)");
+}
 import {
   insertCompanySchema,
   updateCompanySchema,
@@ -34,6 +79,7 @@ import {
   interventionFormSchema,
   contactFormSchema,
   individualLeadFormSchema,
+  insertInvestorSchema,
   type InsertCompanyData,
   type UpdateCompanyData,
   type InsertContactData,
@@ -64,6 +110,242 @@ const authMiddleware = requireSupabaseAuth;
 
   // Initialize stage progression service
   const stageProgressionService = new StageProgressionService(storage);
+
+// Initialize activity log service
+const LEAD_POC_OUTREACH_STATUS_OPTIONS = {
+  linkedin: [
+    "initiated",
+    "request_sent",
+    "no_response_post_process",
+    "unavailable",
+    "positive",
+    "negative",
+    "neutral",
+  ],
+  email: [
+    "initiated",
+    "1st_follow_up",
+    "2nd_follow_up",
+    "3rd_follow_up",
+    "no_response_post_process",
+    "unavailable",
+    "positive",
+    "negative",
+    "email_bounced",
+    "neutral",
+  ],
+  whatsapp: [
+    "initiated",
+    "1st_follow_up",
+    "2nd_follow_up",
+    "3rd_follow_up",
+    "no_response_post_process",
+    "unavailable",
+    "positive",
+    "negative",
+    "call_required",
+    "neutral",
+  ],
+call: [
+  "initiated",
+  "no_response_post_process",
+  "unavailable",
+  "positive",
+  "negative",
+  "neutral",
+],
+  channel_partner: [
+    "initiated",
+    "1st_follow_up",
+    "2nd_follow_up",
+    "3rd_follow_up",
+    "no_response_post_process",
+    "unavailable",
+    "positive",
+    "negative",
+    "neutral",
+  ],
+} as const;
+
+function isValidLeadPocOutreachStatus(channel: string, status: string) {
+  const options =
+    (LEAD_POC_OUTREACH_STATUS_OPTIONS as Record<string, readonly string[]>)[channel] || [];
+  return options.includes(status);
+}
+
+function addDays(date: Date, days: number) {
+  const d = new Date(date);
+  d.setDate(d.getDate() + days);
+  return d;
+}
+
+
+const INVESTOR_POC_OUTREACH_STATUS_OPTIONS = {
+  linkedin: [
+    "initiated",
+    "request_sent",
+    "no_response_post_process",
+    "unavailable",
+    "positive",
+    "negative",
+    "neutral",
+  ],
+  email: [
+    "initiated",
+    "1st_follow_up",
+    "2nd_follow_up",
+    "3rd_follow_up",
+    "no_response_post_process",
+    "unavailable",
+    "positive",
+    "negative",
+    "email_bounced",
+    "neutral",
+  ],
+  whatsapp: [
+    "initiated",
+    "1st_follow_up",
+    "2nd_follow_up",
+    "3rd_follow_up",
+    "no_response_post_process",
+    "unavailable",
+    "positive",
+    "negative",
+    "call_required",
+    "neutral",
+  ],
+call: [
+  "initiated",
+  "no_response_post_process",
+  "unavailable",
+  "positive",
+  "negative",
+  "neutral",
+],
+  channel_partner: [
+    "initiated",
+    "1st_follow_up",
+    "2nd_follow_up",
+    "3rd_follow_up",
+    "no_response_post_process",
+    "unavailable",
+    "positive",
+    "negative",
+    "neutral",
+  ],
+} as const;
+
+function isValidInvestorPocOutreachStatus(channel: string, status: string) {
+  const options =
+    (INVESTOR_POC_OUTREACH_STATUS_OPTIONS as Record<string, readonly string[]>)[channel] || [];
+  return options.includes(status);
+}
+
+function mapInvestorOutreachStatusToLinkedStatus(status?: string | null) {
+  if (!status) return "yet_to_contact";
+
+  switch (status) {
+    case "positive":
+      return "positive";
+    case "negative":
+      return "rejected";
+    case "neutral":
+      return "hold";
+    case "initiated":
+    case "request_sent":
+    case "1st_follow_up":
+    case "2nd_follow_up":
+    case "3rd_follow_up":
+    case "email_bounced":
+    case "unavailable":
+    case "call_required":
+      return "no_response";
+    case "no_response_post_process":
+      return "no_response";
+    default:
+      return "yet_to_contact";
+  }
+}
+
+function deriveLinkedInvestorStatusFromOutreachRows(
+  rows: Array<{ status?: string | null; lastUpdatedAt?: string | Date | null }>,
+  expectedRowCount: number
+) {
+  const filledRows = rows.filter((row) => !!row.status);
+
+  // Blank / untouched investor
+  if (filledRows.length === 0) {
+    return "yet_to_contact";
+  }
+
+  // Dropped only when ALL expected rows exist
+  // AND every one of them is no_response_post_process
+  const allRowsFilled = expectedRowCount > 0 && filledRows.length === expectedRowCount;
+  const allRowsAreNoResponsePostProcess =
+    allRowsFilled &&
+    filledRows.every((row) => row.status === "no_response_post_process");
+
+  if (allRowsAreNoResponsePostProcess) {
+    return "dropped";
+  }
+
+  // Otherwise latest meaningful update decides the current status
+  const latest = [...filledRows].sort((a, b) => {
+    const aTime = a.lastUpdatedAt ? new Date(a.lastUpdatedAt).getTime() : 0;
+    const bTime = b.lastUpdatedAt ? new Date(b.lastUpdatedAt).getTime() : 0;
+    return bTime - aTime;
+  })[0];
+
+  return mapInvestorOutreachStatusToLinkedStatus(latest?.status ?? null);
+}
+
+
+
+async function seedEmailInitiatedCadence(params: {
+  leadId: number;
+  organizationId: number;
+  userId: string;
+  contactName?: string | null;
+  anchorDate: Date;
+  remarks?: string | null;
+}) {
+  const baseDate = new Date(params.anchorDate);
+  baseDate.setHours(9, 30, 0, 0);
+
+  const reminders = [
+    { offset: 0, type: "linkedin_request_self" },
+    { offset: 0, type: "linkedin_messages_self" },
+    { offset: 0, type: "linkedin_request_dinesh" },
+    { offset: 0, type: "linkedin_messages_dinesh" },
+    { offset: 0, type: "linkedin_request_kvs" },
+    { offset: 0, type: "linkedin_messages_kvs" },
+
+    { offset: 1, type: "whatsapp_kvs" },
+    { offset: 1, type: "call_d1_dinesh" },
+
+    { offset: 3, type: "email_d3_analyst" },
+    { offset: 3, type: "whatsapp_dinesh" },
+
+    { offset: 7, type: "channel_partner" },
+    { offset: 7, type: "email_d7_kvs" },
+  ];
+
+  const baseNotes =
+    params.remarks?.trim() ||
+    `Auto-created cadence for Email Initiated${params.contactName ? ` - ${params.contactName}` : ""}`;
+
+  for (const reminder of reminders) {
+    await storage.createIntervention({
+      leadId: params.leadId,
+      type: reminder.type,
+      scheduledAt: addDays(baseDate, reminder.offset),
+      notes: baseNotes,
+      organizationId: params.organizationId,
+      userId: params.userId,
+      status: "pending",
+    });
+  }
+}
 
   export async function registerRoutes(app: Express): Promise<Server> {
     
@@ -160,6 +442,65 @@ const authMiddleware = requireSupabaseAuth;
       }
     });
 
+
+
+
+        // ✅ NEW ROUTE for Phase 2: Daily Activity Feed (Stage Movements & Notes)
+    app.get('/api/analytics/daily-feed', authMiddleware, async (req: any, res) => {
+      try {
+        const organizationId = req.verifiedUser?.organizationId || req.user?.organizationId;
+        const type = (req.query.type as string) || 'lead'; // expects 'lead', 'investor', or 'epn'
+
+        if (!organizationId) {
+          return res.status(401).json({ message: "Organization ID missing" });
+        }
+
+        // Calculate exactly 24 hours ago
+        const yesterday = new Date();
+        yesterday.setHours(yesterday.getHours() - 24);
+
+        // Fetch parallel data to make the request faster
+        const [stageMovements, notes] = await Promise.all([
+          storage.getRecentStageMovements(organizationId, type, yesterday),
+          storage.getRecentNotes(organizationId, type, yesterday)
+        ]);
+
+        res.json({
+          success: true,
+          type,
+          data: {
+            stageMovements,
+            notes
+          }
+        });
+      } catch (error) {
+        console.error("Error fetching daily feed:", error);
+        res.status(500).json({ message: "Failed to fetch daily activity feed" });
+      }
+    });
+
+
+
+
+    // ✅ NEW: Userwise Pipeline Aging Analytics
+    app.get('/api/analytics/pipeline-aging', authMiddleware, async (req: any, res) => {
+      try {
+        const orgId = req.verifiedUser?.organizationId;
+        if (!orgId) return res.status(401).json({ message: "Unauthorized" });
+        
+        const data = await storage.getPipelineAgingStats(Number(orgId));
+        res.json(data);
+      } catch (error) {
+        console.error("Pipeline aging fetch error:", error);
+        res.status(500).json({ message: "Failed to fetch aging stats" });
+      }
+    });
+
+
+
+
+
+
     // Clear test role
     app.post('/api/auth/clear-test-role', authMiddleware, async (req: any, res) => {
       try {
@@ -231,10 +572,14 @@ const authMiddleware = requireSupabaseAuth;
     
     // Protected routes with role-based access
     app.use('/api/users', authMiddleware, requireRole(['partner', 'admin', 'analyst']), userRoutes);
-    app.use('/api/companies', authMiddleware, requireRole(['partner', 'admin']), companyRoutes);
+    app.use('/api/companies', authMiddleware, requireRole(['partner', 'admin', 'analyst']), companyRoutes);
     app.use('/api/leads', authMiddleware, leadRoutes); // Role checks moved to individual routes
+    app.use('/api/leads', authMiddleware, leadSolutionNoteRoutes); // NEW Lead Solution Note routes
     app.use('/api/contacts', authMiddleware, contactRoutes);
     
+    app.use('/api/investor-events', authMiddleware, investorEventsRoutes);
+
+    app.use('/api/epn', authMiddleware, requireRole(['partner', 'admin']), epnRoutes); // NEW EPN routes - only partners and admins can access
 
     // Dashboard routes
     app.get('/api/dashboard/metrics', authMiddleware, async (req: any, res) => {
@@ -249,12 +594,13 @@ const authMiddleware = requireSupabaseAuth;
         const userRole = user.role || 'analyst';
 
         // Analysts only see their own metrics. Partners/Admins see all.
-        const metricsUserId = userRole === 'analyst' ? userId : undefined;
+        const metricsUserId = (userRole === 'analyst' || userRole === 'partner') ? userId : undefined;
 
         const metrics = await storage.getDashboardMetrics(
           Number(user.organizationId),
           metricsUserId
         );
+
 
         // Prevent 304 caching issues
         res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
@@ -271,6 +617,477 @@ const authMiddleware = requireSupabaseAuth;
         res.status(500).json({ message: 'Failed to fetch dashboard metrics' });
       }
     });
+
+
+
+    // ✅ NEW ROUTE: Weekly Momentum
+    app.get('/api/dashboard/weekly-momentum', authMiddleware, async (req: any, res) => {
+      try {
+        const user = req.verifiedUser;
+        if (!user || !user.organizationId) {
+          return res.status(401).json({ message: "Unauthorized" });
+        }
+
+        const momentum = await storage.getWeeklyMomentum(Number(user.organizationId));
+        res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.json(momentum);
+      } catch (error) {
+        console.error('Error fetching weekly momentum:', error);
+        res.status(500).json({ message: 'Failed to fetch weekly momentum' });
+      }
+    });
+
+    // ✅ NEW ROUTE: User Activity Summary
+    app.get('/api/dashboard/user-activity', authMiddleware, async (req: any, res) => {
+      try {
+        const user = req.verifiedUser;
+        if (!user || !user.organizationId) {
+          return res.status(401).json({ message: "Unauthorized" });
+        }
+
+        const activity = await storage.getUserActivitySummary(Number(user.organizationId));
+        res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.json(activity);
+      } catch (error) {
+        console.error('Error fetching user activity summary:', error);
+        res.status(500).json({ message: 'Failed to fetch user activity summary' });
+      }
+    });
+
+
+        // ✅ NEW ROUTE: Audit User Profile
+    app.get('/api/audit/users/:userId/profile', authMiddleware, requireRole(['admin', 'partner']), async (req: any, res) => {
+      try {
+        const currentUser = req.verifiedUser;
+        if (!currentUser?.organizationId) {
+          return res.status(401).json({ message: 'Unauthorized' });
+        }
+
+        const targetUser = await storage.getUser(String(req.params.userId));
+        if (!targetUser || Number(targetUser.organizationId) !== Number(currentUser.organizationId)) {
+          return res.status(404).json({ message: 'User not found' });
+        }
+
+        const rawWindow = String(req.query.window || '24h');
+        const window = ['24h', '15d', '30d'].includes(rawWindow) ? rawWindow : '24h';
+
+        const profile = await storage.getAuditUserProfile(
+          Number(currentUser.organizationId),
+          String(req.params.userId),
+          window
+        );
+
+        if (!profile) {
+          return res.status(404).json({ message: 'Audit profile not found' });
+        }
+
+        res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.json(profile);
+      } catch (error) {
+        console.error('Error fetching audit user profile:', error);
+        res.status(500).json({ message: 'Failed to fetch audit user profile' });
+      }
+    });
+
+    // ✅ NEW ROUTE: Audit User Leads
+    app.get('/api/audit/users/:userId/leads', authMiddleware, requireRole(['admin', 'partner']), async (req: any, res) => {
+      try {
+        const currentUser = req.verifiedUser;
+        if (!currentUser?.organizationId) {
+          return res.status(401).json({ message: 'Unauthorized' });
+        }
+
+        const targetUser = await storage.getUser(String(req.params.userId));
+        if (!targetUser || Number(targetUser.organizationId) !== Number(currentUser.organizationId)) {
+          return res.status(404).json({ message: 'User not found' });
+        }
+
+        const rawWindow = String(req.query.window || '24h');
+        const window = ['24h', '15d', '30d'].includes(rawWindow) ? rawWindow : '24h';
+
+        const data = await storage.getAuditUserLeadDetails(
+          Number(currentUser.organizationId),
+          String(req.params.userId),
+          window
+        );
+
+        res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.json(data);
+      } catch (error) {
+        console.error('Error fetching audit user lead details:', error);
+        res.status(500).json({ message: 'Failed to fetch audit user lead details' });
+      }
+    });
+
+    // ✅ NEW ROUTE: Audit User Investors
+    app.get('/api/audit/users/:userId/investors', authMiddleware, requireRole(['admin', 'partner']), async (req: any, res) => {
+      try {
+        const currentUser = req.verifiedUser;
+         if (!currentUser?.organizationId) {
+          return res.status(401).json({ message: 'Unauthorized' });
+        }
+
+        const targetUser = await storage.getUser(String(req.params.userId));
+        if (!targetUser || Number(targetUser.organizationId) !== Number(currentUser.organizationId)) {
+          return res.status(404).json({ message: 'User not found' });
+        }
+
+        const rawWindow = String(req.query.window || '24h');
+        const window = ['24h', '15d', '30d'].includes(rawWindow) ? rawWindow : '24h';
+
+        const data = await storage.getAuditUserInvestorDetails(
+          Number(currentUser.organizationId),
+          String(req.params.userId),
+          window
+        );
+
+        res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.json(data);
+      } catch (error) {
+        console.error('Error fetching audit user investor details:', error);
+        res.status(500).json({ message: 'Failed to fetch audit user investor details' });
+      }
+    });
+
+    // ✅ NEW ROUTE: Audit User EPN
+    app.get('/api/audit/users/:userId/epn', authMiddleware, requireRole(['admin', 'partner']), async (req: any, res) => {
+      try {
+        const currentUser = req.verifiedUser;
+        if (!currentUser?.organizationId) {
+          return res.status(401).json({ message: 'Unauthorized' });
+        }
+
+        const targetUser = await storage.getUser(String(req.params.userId));
+        if (!targetUser || Number(targetUser.organizationId) !== Number(currentUser.organizationId)) {
+          return res.status(404).json({ message: 'User not found' });
+        }
+
+        const rawWindow = String(req.query.window || '24h');
+        const window = ['24h', '15d', '30d'].includes(rawWindow) ? rawWindow : '24h';
+
+        const data = await storage.getAuditUserEpnDetails(
+          Number(currentUser.organizationId),
+          String(req.params.userId),
+          window
+        );
+
+        res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.json(data);
+      } catch (error) {
+        console.error('Error fetching audit user EPN details:', error);
+        res.status(500).json({ message: 'Failed to fetch audit user EPN details' });
+      }
+    });
+
+    // ✅ NEW ROUTE: Audit User Timeline
+    app.get('/api/audit/users/:userId/timeline', authMiddleware, requireRole(['admin', 'partner']), async (req: any, res) => {
+      try {
+        const currentUser = req.verifiedUser;
+        if (!currentUser?.organizationId) {
+          return res.status(401).json({ message: 'Unauthorized' });
+        }
+
+        const targetUser = await storage.getUser(String(req.params.userId));
+        if (!targetUser || Number(targetUser.organizationId) !== Number(currentUser.organizationId)) {
+          return res.status(404).json({ message: 'User not found' });
+        }
+
+        const rawWindow = String(req.query.window || '24h');
+        const window = ['24h', '15d', '30d'].includes(rawWindow) ? rawWindow : '24h';
+
+        const parsedLimit = parseInt(String(req.query.limit || '100'), 10);
+        const limit = Number.isFinite(parsedLimit)
+          ? Math.min(Math.max(parsedLimit, 1), 200)
+          : 100;
+
+        const data = await storage.getAuditUserTimeline(
+          Number(currentUser.organizationId),
+          String(req.params.userId),
+          window,
+          limit
+        );
+
+        res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.json(data);
+      } catch (error) {
+        console.error('Error fetching audit user timeline:', error);
+        res.status(500).json({ message: 'Failed to fetch audit user timeline' });
+      }
+    });
+
+
+        // ✅ NEW ROUTE: Audit Overview
+    app.get('/api/audit/overview', authMiddleware, requireRole(['admin', 'partner']), async (req: any, res) => {
+      try {
+        const user = req.verifiedUser;
+        if (!user || !user.organizationId) {
+          return res.status(401).json({ message: "Unauthorized" });
+        }
+
+        const overview = await storage.getAuditOverviewMetrics(Number(user.organizationId));
+        res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.json(overview);
+      } catch (error) {
+        console.error('Error fetching audit overview:', error);
+        res.status(500).json({ message: 'Failed to fetch audit overview' });
+      }
+    });
+
+    // ✅ NEW ROUTE: Audit User Summaries
+    app.get('/api/audit/users/summary', authMiddleware, requireRole(['admin', 'partner']), async (req: any, res) => {
+      try {
+        const user = req.verifiedUser;
+        if (!user || !user.organizationId) {
+          return res.status(401).json({ message: "Unauthorized" });
+        }
+
+        const summaries = await storage.getAuditUserSummaries(Number(user.organizationId));
+        res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.json(summaries);
+      } catch (error) {
+        console.error('Error fetching audit user summaries:', error);
+        res.status(500).json({ message: 'Failed to fetch audit user summaries' });
+      }
+    });
+
+
+
+        // ✅ NEW ROUTE: Investor Metrics for Unified Dashboard
+    app.get('/api/dashboard/investor-metrics', authMiddleware, async (req: any, res) => {
+      try {
+        const user = req.verifiedUser;
+        if (!user || !user.organizationId) {
+          return res.status(401).json({ message: "Unauthorized" });
+        }
+
+        const metrics = await storage.getInvestorMetrics(Number(user.organizationId), user);
+        
+        // Prevent caching
+        res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.json(metrics);
+      } catch (error) {
+        console.error('Error fetching investor metrics:', error);
+        res.status(500).json({ message: 'Failed to fetch investor metrics' });
+      }
+    });
+
+    // 3. Network Health / Linkage Metrics
+    app.get('/api/dashboard/linkage-metrics', authMiddleware, async (req: any, res) => {
+      try {
+        const user = req.verifiedUser;
+        if (!user || !user.organizationId) {
+          return res.status(401).json({ message: "Unauthorized" });
+        }
+
+        const metrics = await storage.getLinkageMetrics(Number(user.organizationId));
+        
+        // Prevent caching
+        res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.json(metrics);
+      } catch (error) {
+        console.error('Error fetching linkage metrics:', error);
+        res.status(500).json({ message: 'Failed to fetch linkage metrics' });
+      }
+    });
+
+
+
+
+
+    // News Feed Routes
+
+    // Helper to fetch Google News RSS
+async function fetchLatestGoogleNews(organizationId: number, category: 'leads' | 'investors'= 'leads') {
+  try {
+    // 1. Define high-authority Indian business/investor sources
+    const sources = '(site:vccircle.com OR site:inc42.com OR site:economictimes.indiatimes.com OR site:livemint.com OR site:entrackr.com OR site:dealstreetasia.com)';
+    
+    // 2. Build Category-Specific Queries
+    let query = '';
+    if (category === 'investors') {
+      // Focus: Fund launches, LP/GP moves, VC/PE firm news
+      query = '("Limited Partner" OR "Venture Capital fund" OR "Private Equity India" OR "Fund Launch" OR "Dry Powder" OR "AIF news" OR "Exit news")';
+    } else {
+      // Focus: Sector growth and M&A (Leads)
+      query = '("Private Equity" OR "M&A" OR "Structured Credit" OR "Healthcare sector" OR "Renewables" OR "Consumer" OR "IT and ITES")';
+    }
+    
+    const encodedQuery = encodeURIComponent(`${query} AND India AND ${sources} when:1d`);
+    const rssUrl = `https://news.google.com/rss/search?q=${encodedQuery}&hl=en-IN&gl=IN&ceid=IN:en`;
+    
+    const response = await fetch(rssUrl);
+    const text = await response.text();
+
+    const items = [];
+    const itemRegex = /<item>([\s\S]*?)<\/item>/g;
+    const titleRegex = /<title>(.*?)<\/title>/;
+    const linkRegex = /<link>(.*?)<\/link>/;
+    const dateRegex = /<pubDate>(.*?)<\/pubDate>/;
+    const sourceRegex = /<source.*?>([\s\S]*?)<\/source>/;
+
+    let match;
+    let count = 0;
+
+    while ((match = itemRegex.exec(text)) !== null && count < 8) {
+      const itemContent = match[1];
+      const titleMatch = titleRegex.exec(itemContent);
+      const linkMatch = linkRegex.exec(itemContent);
+      const dateMatch = dateRegex.exec(itemContent);
+      const sourceMatch = sourceRegex.exec(itemContent);
+
+      if (titleMatch && linkMatch) {
+        items.push({
+          organizationId,
+          category, // ✅ Tagging the news correctly
+          title: titleMatch[1].replace(/<!\[CDATA\[(.*?)\]\]>/g, "$1"),
+          url: linkMatch[1],
+          source: sourceMatch ? sourceMatch[1] : "Google News",
+          publishedAt: dateMatch ? new Date(dateMatch[1]) : new Date(),
+        });
+        count++;
+      }
+    }
+    return items;
+
+  } catch (error) {
+    console.error(`Error fetching ${category} news:`, error);
+    return [];
+  }
+}
+
+  
+  app.get('/api/news', authMiddleware, async (req: any, res) => {
+  try {
+    const user = req.verifiedUser;
+    if (!user?.organizationId) return res.status(401).json({ message: "Unauthorized" });
+
+    const category = (req.query.category as 'leads' | 'investors') || 'leads';
+    let items = await storage.getNewsFeed(user.organizationId, category);
+
+    const now = new Date();
+    const today9AM = new Date();
+    today9AM.setHours(9, 0, 0, 0);
+
+    // ✅ IMPROVED STALE LOGIC:
+    // It is stale if the DB is empty OR the latest news in the DB was created 
+    // on a PREVIOUS calendar day and it is now past 9 AM today.
+    // ✅ FIX: Use a fallback Date if createdAt is null to satisfy TypeScript
+    const lastFetchDate = items.length > 0 && items[0].createdAt 
+      ? new Date(items[0].createdAt) 
+      : new Date(0); // Fallback to epoch if null/empty
+
+    // IMPROVED STALE LOGIC:
+    // It is stale if the DB is empty OR the latest news in the DB was created 
+    // on a PREVIOUS calendar day and it is now past 9 AM today.
+    const isStale = items.length === 0 || (
+      lastFetchDate.toDateString() !== now.toDateString() && now > today9AM
+    );
+
+    if (isStale) {
+      console.log(`[News] Wiping and refreshing ${category} feed for the new day...`);
+      
+      // 1. CLEAR the old news first so only today's results remain
+      await storage.clearNewsFeed(user.organizationId, category);
+
+      // 2. Fetch fresh news (this uses 'when:1d' in the RSS query)
+      const freshNews = await fetchLatestGoogleNews(user.organizationId, category);
+
+      if (freshNews.length > 0) {
+        for (const newsItem of freshNews) {
+          await storage.createNewsItem(newsItem);
+        }
+        // Re-fetch clean list
+        items = await storage.getNewsFeed(user.organizationId, category);
+      }
+    }
+
+    res.json(items);
+  } catch (error) {
+    console.error('Error fetching news:', error);
+    res.status(500).json({ message: 'Failed to fetch news' });
+  }
+});
+
+
+    app.post('/api/news/refresh', authMiddleware, requireRole(['admin', 'partner']), async (req: any, res) => {
+  try {
+    const user = req.verifiedUser;
+    const category = (req.body.category as 'leads' | 'investors') || 'leads';
+
+    // 1. Clear old news for this specific category
+    await storage.clearNewsFeed(user.organizationId, category);
+
+    // 2. Fetch fresh news using the category argument
+    const freshNews = await fetchLatestGoogleNews(user.organizationId, category);
+
+    for (const newsItem of freshNews) {
+      await storage.createNewsItem(newsItem);
+    }
+    
+    res.json({ message: `${category} news feed refreshed`, count: freshNews.length });
+  } catch (error) {
+    console.error('Force refresh failed:', error);
+    res.status(500).json({ message: "Failed to force refresh" });
+  }
+});
+
+
+    app.post('/api/news', authMiddleware, requireRole(['admin', 'partner']), async (req: any, res) => {
+      try {
+        const user = req.verifiedUser;
+        if (!user?.organizationId) return res.status(401).json({ message: "Unauthorized" });
+
+        const data = insertNewsFeedSchema.parse({
+          ...req.body,
+          organizationId: user.organizationId
+        });
+
+        const item = await storage.createNewsItem(data);
+        res.json(item);
+      } catch (error) {
+        console.error('Error creating news item:', error);
+        res.status(400).json({ message: 'Failed to create news item' });
+      }
+    });
+
+
+
+
+
+    // Dashboard table: stage counts by Source (whitelisted analysts + partners)
+    app.get('/api/dashboard/source-stage-table', authMiddleware, async (req: any, res) => {
+      try {
+        const user = req.verifiedUser;
+        if (!user || !user.id || !user.organizationId) {
+          return res.status(401).json({ message: 'User not authenticated' });
+        }
+
+        const userRole = user.role || 'analyst';
+
+        // ✅ If you want Partners ALSO to see the full table, use: userRole === 'admin' || userRole === 'partner'
+        const includeAll = userRole === 'admin';
+
+        const table = await storage.getDashboardSourceStageTable(Number(user.organizationId), {
+          includeAll,
+          viewerUserId: user.id,
+          viewerRole: userRole,
+        });
+
+        // Prevent 304 caching issues
+        res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.set('Expires', '0');
+
+        res.json({
+          ...table,
+          userRole,
+          includeAll,
+        });
+      } catch (error) {
+        console.error('Error fetching dashboard source-stage table:', error);
+        res.status(500).json({ message: 'Failed to fetch dashboard source-stage table' });
+      }
+    });
+
 
     // Populate dummy data - DEV ONLY
     app.post('/api/dev/populate-data', authMiddleware, requireRole(['admin']), async (req: any, res) => {
@@ -503,6 +1320,924 @@ const authMiddleware = requireSupabaseAuth;
       }
     });
 
+
+        // ==============================
+    // INVESTOR RELATION (ADMIN ONLY)
+    // ==============================
+
+    app.get("/api/investors", authMiddleware, requireRole(["admin", "partner", "analyst"]), async (req: any, res) => {
+
+      try {
+        const user = req.verifiedUser;
+        if (!user?.organizationId) return res.status(401).json({ message: "Unauthorized" });
+
+  // ✅ Default to "all" if not provided, or allow explicit "all"
+        const stage = String(req.query.stage || "all").toLowerCase();
+        
+        // ✅ Add "all" to the allowed list
+        const allowed = ["all", "outreach", "warm", "active", "dealmaking"];
+        if (!allowed.includes(stage)) {
+          return res.status(400).json({ message: "Invalid stage" });
+        }
+
+        const data = await storage.getInvestorsByStage(user.organizationId, stage, user);
+        res.json(data);
+      } catch (e) {
+        console.error("GET /api/investors error:", e);
+        res.status(500).json({ message: "Failed to fetch investors" });
+      }
+    });
+
+        // ✅ INSERT THE NEW CONTACT METRICS ROUTE HERE
+    // This must come BEFORE any route with :investorId or :id to prevent conflicts
+    app.get("/api/investors/contact-metrics", authMiddleware, requireRole(["admin","partner","analyst"]), async (req: any, res) => {
+      if (!req.user) return res.sendStatus(401);
+      
+      try {
+        // Call the new storage method we just created
+        const user = req.verifiedUser;
+        const metrics = await storage.getInvestorContactMetrics(user.organizationId, user);
+        res.json(metrics);
+      } catch (error) {
+        console.error("Error fetching investor contact metrics:", error);
+        res.status(500).json({ message: "Failed to fetch metrics" });
+      }
+    });
+
+
+    
+    // ✅ INVESTOR POC COVERAGE ROUTES (Add to Investor section)
+
+    // GET /api/investors/poc-coverage/:slot (0, 1, or 2)
+    app.get("/api/investors/poc-coverage/:slot", authMiddleware, requireRole(["admin","partner","analyst"]), async (req: any, res) => {
+      try {
+        const slot = parseInt(req.params.slot);
+        if (isNaN(slot) || slot < 0 || slot > 5) return res.status(400).send("Invalid slot");
+        
+        const user = req.verifiedUser;
+        const rows = await storage.getInvestorPocCoverage(user.organizationId, slot, user);
+        res.json({ items: rows });
+      } catch (e) {
+        console.error("GET poc-coverage error:", e);
+        res.status(500).json({ message: "Failed to fetch POC data" });
+      }
+    });
+
+    // POST /api/investors/poc-coverage/:slot
+    app.post("/api/investors/poc-coverage/:slot", authMiddleware, requireRole(["admin","partner","analyst"]), async (req: any, res) => {
+      try {
+        const slot = parseInt(req.params.slot);
+
+        const user = req.verifiedUser;
+
+        if (user.role === "analyst") {
+          const investorId = Number(req.body?.investorId);
+          if (!Number.isFinite(investorId)) return res.status(400).json({ message: "Invalid investorId" });
+
+          const inv = await storage.getInvestorById(Number(user.organizationId), investorId, user);
+          if (!inv) return res.status(403).json({ message: "Forbidden: investor not visible to you" });
+        }
+        const result = await storage.saveInvestorPocSlot(req.verifiedUser.organizationId, req.body, slot);
+        res.json(result);
+      } catch (e) {
+        console.error("POST poc-coverage error:", e);
+        res.status(500).json({ message: "Failed to save POC data" });
+      }
+    });
+
+
+    // ✅ NEW ROUTE: Investor Metrics
+    app.get("/api/investors/metrics", authMiddleware, requireRole(["admin","partner","analyst"]), async (req: any, res) => {
+      try {
+        const user = req.verifiedUser;
+        if (!user?.organizationId) return res.status(401).json({ message: "Unauthorized" });
+
+        const metrics = await storage.getInvestorMetrics(Number(user.organizationId), user);
+        res.json(metrics);
+      } catch (error) {
+        console.error("Error fetching investor metrics:", error);
+        res.status(500).json({ message: "Failed to fetch investor metrics" });
+      }
+    });
+
+
+
+
+
+
+    // ==========================================
+    // INVESTOR CONTACT MANAGEMENT - OTHER FIELDS
+    // ==========================================
+
+    // GET /api/investor-contact-management/other-fields
+    app.get("/api/investor-contact-management/other-fields", authMiddleware, requireRole(["admin", "partner", "analyst"]), async (req: any, res) => {
+      try {
+        const user = req.verifiedUser;
+        if (!user?.organizationId) return res.status(401).json({ message: "Unauthorized" });
+
+        const data = await storage.getInvestorsForOtherFields(user.organizationId, user);
+        res.json(data);
+      } catch (error) {
+        console.error("Error fetching investor other fields:", error);
+        res.status(500).json({ message: "Failed to fetch investor data" });
+      }
+    });
+
+    // PATCH /api/investor-contact-management/other-fields/:investorId
+    app.patch("/api/investor-contact-management/other-fields/:investorId", authMiddleware, requireRole(["admin", "partner", "analyst"]), async (req: any, res) => {
+      try {
+        const user = req.verifiedUser;
+        if (!user?.organizationId) return res.status(401).json({ message: "Unauthorized" });
+
+        const investorId = Number(req.params.investorId);
+        if (isNaN(investorId)) return res.status(400).json({ message: "Invalid investor ID" });
+
+        // Extract only allowed fields
+        const { name, investorType, website, sector, location } = req.body;
+        const updates: any = {};
+
+        if (name !== undefined) updates.name = name;
+        if (investorType !== undefined) updates.investorType = investorType;
+        if (website !== undefined) updates.website = website;
+        if (sector !== undefined) updates.sector = sector;
+        if (location !== undefined) updates.location = location;
+
+        if (Object.keys(updates).length === 0) {
+          return res.status(400).json({ message: "No valid fields to update" });
+        }
+
+        const updated = await storage.updateInvestor(user.organizationId, investorId, updates);
+        
+        if (!updated) {
+          return res.status(404).json({ message: "Investor not found" });
+        }
+
+        res.json(updated);
+      } catch (error) {
+        console.error("Error updating investor other fields:", error);
+        res.status(500).json({ message: "Failed to update investor" });
+      }
+    });
+
+
+    
+
+    // investor routes
+    app.post("/api/investors", authMiddleware, requireRole(["admin", "partner", "analyst"]), async (req: any, res) => {
+          try {
+            const user = req.verifiedUser;
+            if (!user?.organizationId) return res.status(401).json({ message: "Unauthorized" });
+
+            const body = req.body || {};
+
+            const investorParsed = insertInvestorSchema.safeParse({
+              name: body.name,
+              sector: body.sector,
+              location: body.location,
+              investorType: body.investorType,
+              website: body.website,
+              description: body.description,
+              stage: "outreach",
+            });
+
+            if (!investorParsed.success) {
+              return res.status(400).json({ message: "Invalid investor data", errors: investorParsed.error.flatten() });
+            }
+
+            // Handle multiple contacts array
+            const contactsList = Array.isArray(body.contacts) ? body.contacts : [];
+
+            // Backward compatibility: if no list, check for old single fields
+            if (contactsList.length === 0 && body.pocName) {
+                contactsList.push({
+                    name: body.pocName,
+                    designation: body.pocDesignation,
+                    email: body.pocEmail,
+                    phone: body.pocPhone,
+                    linkedinProfile: body.pocLinkedin
+                });
+            }
+
+            const result = await storage.createInvestor(
+              user.organizationId,
+              investorParsed.data as any,
+              contactsList,
+              String(user.id),
+              "create"
+            );
+
+               // ✅ ADDED THIS BLOCK: Log activity for Unified Dashboard
+        try {
+           await storage.createActivityLog({
+            organizationId: user.organizationId,
+            userId: user.id,
+            action: `added a new investor: ${result.investor.name}`,
+            entityType: 'investor', 
+            entityId: result.investor.id,
+            metadata: { 
+              stage: result.investor.stage,
+              sector: result.investor.sector 
+            }
+          });
+        } catch (logErr) {
+          console.error("Failed to log investor creation:", logErr);
+        }
+        // ✅ END OF NEW BLOCK
+
+
+            res.json(result);
+          } catch (e) {
+            console.error("POST /api/investors error:", e);
+            res.status(500).json({ message: "Failed to create investor" });
+          }
+        });
+
+
+            // ✅ NEW: Get unique investor locations for dropdowns
+
+    app.get("/api/investors/locations", authMiddleware, requireRole(["admin", "partner", "analyst"]), async (req: any, res) => {
+
+      try {
+
+        const user = req.verifiedUser;
+
+        if (!user?.organizationId) return res.status(401).json({ message: "Unauthorized" });
+
+
+
+        const locations = await storage.getUniqueInvestorLocations(Number(user.organizationId));
+
+        res.json(locations);
+
+      } catch (e) {
+
+        console.error("GET /api/investors/locations error:", e);
+
+        res.status(500).json({ message: "Failed to fetch locations" });
+
+      }
+
+    });
+
+
+    // investor routes
+    app.get(
+    "/api/investors/:investorId",
+    authMiddleware,
+    requireRole(["admin","partner", "analyst"]),
+    async (req: any, res) => {
+      try {
+        const user = req.verifiedUser;
+        if (!user?.organizationId) return res.status(401).json({ message: "Unauthorized" });
+
+        const investorId = Number(req.params.investorId);
+        if (!Number.isFinite(investorId) || investorId <= 0) {
+          return res.status(400).json({ message: "Invalid investorId" });
+        }
+
+        const investor = await storage.getInvestorById(Number(user.organizationId), investorId, user);
+        if (!investor) return res.status(404).json({ message: "Investor not found" });
+
+        res.json(investor);
+      } catch (e) {
+        console.error("GET /api/investors/:investorId error:", e);
+        res.status(500).json({ message: "Failed to fetch investor" });
+      }
+    }
+  );
+
+         // investor poc details route
+       // GET Contacts for an investor
+    app.get("/api/investors/:id/contacts", authMiddleware, requireRole(["admin","partner","analyst"]), async (req: any, res) => {
+      try {
+        const user = req.verifiedUser;
+        if (!user?.organizationId) return res.status(401).json({ message: "Unauthorized" });
+
+        const investorId = Number(req.params.id);
+        if (!Number.isFinite(investorId) || investorId <= 0) {
+          return res.status(400).json({ message: "Invalid investor id" });
+        }
+
+        const investor = await storage.getInvestorById(Number(user.organizationId), investorId, user);
+        if (!investor) return res.status(404).json({ message: "Investor not found" });
+
+        res.json((investor as any).contacts || []);
+      } catch (e) {
+        console.error("GET /api/investors/:id/contacts error:", e);
+        res.status(500).json({ message: "Failed to fetch contacts" });
+      }
+    });
+
+
+      // PUT (Replace/Update) Contacts
+// PUT (Replace/Update) Contacts
+    app.put("/api/investors/:id/contacts", authMiddleware, requireRole(["admin","partner","analyst"]), async (req: any, res) => {
+      try {
+        const user = req.verifiedUser;
+        if (!user?.organizationId) return res.status(401).json({ message: "Unauthorized" });
+
+        const contacts = req.body.contacts || [];
+        await storage.replaceInvestorContacts(Number(req.params.id), contacts);
+        res.json({ success: true });
+      } catch (e) {
+        console.error("Update contacts error:", e);
+        res.status(500).json({ message: "Failed to update contacts" });
+      }
+    });
+
+
+  // Update investor (e.g. sector)
+        app.patch(
+          "/api/investors/:investorId",
+          authMiddleware,
+          requireRole(["admin","partner", "analyst"]),
+          async (req: any, res) => {
+            try {
+              const user = req.verifiedUser;
+              if (!user?.organizationId) return res.status(401).json({ message: "Unauthorized" });
+
+              const investorId = Number(req.params.investorId);
+              if (!Number.isFinite(investorId)) return res.status(400).json({ message: "Invalid ID" });
+
+              const updates = req.body; // e.g. { sector: "IT, HR" }
+              const updated = await storage.updateInvestor(Number(user.organizationId), investorId, updates);
+              
+              if (!updated) return res.status(404).json({ message: "Investor not found" });
+              res.json(updated);
+            } catch (e) {
+              console.error("PATCH /api/investors/:investorId error:", e);
+              res.status(500).json({ message: "Failed to update investor" });
+            }
+          }
+        );
+
+
+     // investor routes
+    app.get(
+      "/api/investors/:investorId/outreach-activities",
+      authMiddleware,
+      requireRole(["admin"]),
+      async (req: any, res) => {
+        const user = req.verifiedUser;
+        if (!user?.organizationId) return res.status(401).json({ message: "Unauthorized" });
+
+        const investorId = Number(req.params.investorId);
+        const rows = await storage.getInvestorOutreachActivities(Number(user.organizationId), investorId);
+        res.json(rows);
+      }
+    );
+
+    // Move Investor to a new stage
+          app.patch(
+            "/api/investors/:investorId/move-to-stage",
+            authMiddleware,
+            requireRole(["admin", "partner", "analyst"]),
+            async (req: any, res) => {
+              try {
+                const { investorId } = req.params;
+                const { stage } = req.body; // Stage can be "warm" or "dealmaking"
+
+                if (!stage || !["warm", "dealmaking"].includes(stage)) {
+                  return res.status(400).json({ message: "Invalid stage" });
+                }
+
+                const user = req.verifiedUser;
+                if (!user?.organizationId) return res.status(401).json({ message: "Unauthorized" });
+
+                // Call the service to update the investor's stage
+                await storage.updateInvestorStage(user.organizationId, Number(investorId), stage);
+                
+                res.json({ message: "Investor moved to " + stage + " stage" });
+              } catch (e) {
+                console.error("Error moving investor stage:", e);
+                res.status(500).json({ message: "Failed to update investor stage" });
+              }
+            }
+          );
+
+    
+        // ✅ ONE-TIME FIX ROUTE: Sync Investor Stages
+// ✅ RESTORED SECURE VERSION (Admin Only)
+    app.post("/api/admin/sync-investor-stages", authMiddleware, requireRole(["admin"]), async (req: any, res) => {
+      try {
+        const user = req.verifiedUser;
+        if (!user?.organizationId) return res.status(401).json({ message: "Unauthorized" });
+
+        const result = await storage.syncInvestorStages(user.organizationId);
+        res.json(result);
+      } catch (e) {
+        console.error("Sync Error:", e);
+        res.status(500).json({ message: "Failed to sync stages" });
+      }
+    });
+
+           // investor lead linkage
+          app.get(
+                "/api/investors/:investorId/linked-leads",
+                authMiddleware,
+                requireRole(["admin", "partner", "analyst"]),
+                async (req: any, res) => {
+                  try {
+                    const user = req.verifiedUser;
+                    if (!user?.organizationId) return res.status(401).json({ message: "Unauthorized" });
+
+                    // ✅ Analyst sandbox: can only view investors they can see
+                    if (user.role === "analyst") {
+                      const inv = await storage.getInvestorById(Number(user.organizationId), investorId, user);
+                      if (!inv) return res.status(404).json({ message: "Investor not found" });
+                    }
+
+                    const investorId = Number(req.params.investorId);
+                    if (!Number.isFinite(investorId) || investorId <= 0) {
+                      return res.status(400).json({ message: "Invalid investorId" });
+                    }
+
+                    const data = await storage.getInvestorLinkedLeads(Number(user.organizationId), investorId);
+                    res.json(data);
+                  } catch (e) {
+                    console.error("GET /api/investors/:investorId/linked-leads error:", e);
+                    res.status(500).json({ message: "Failed to fetch linked leads" });
+                  }
+                }
+              );
+
+
+              // Bulk link investors to a lead
+// Bulk link investors to a lead
+    app.post(
+      "/api/leads/:leadId/link-investors",
+      authMiddleware,
+      requireRole(["admin", "partner", "analyst"]),
+      async (req: any, res) => {
+        try {
+          const user = req.verifiedUser;
+          if (!user?.organizationId) return res.status(401).json({ message: "Unauthorized" });
+          
+          const leadId = Number(req.params.leadId);
+          
+          // ✅ We need 'selections', NOT 'investorIds'
+          const { selections } = req.body; 
+
+          if (!Number.isFinite(leadId)) {
+            return res.status(400).json({ message: "Invalid leadId" });
+          }
+          if (!Array.isArray(selections)) {
+            return res.status(400).json({ message: "selections must be an array" });
+          }
+
+          // ✅ Analyst restriction: can only link to leads assigned to them
+        if (user.role === "analyst") {
+          const lead = await storage.getLead(leadId, Number(user.organizationId));
+          if (!lead) return res.status(404).json({ message: "Lead not found" });
+
+          const uid = String(user.id);
+          const inSandbox =
+            (lead as any).ownerAnalystId === uid ||
+            (lead as any).assignedTo === uid ||
+            (lead as any).createdBy === uid ||
+            (Array.isArray((lead as any).assignedInterns) && (lead as any).assignedInterns.includes(uid));
+          if (!inSandbox) {
+            return res.status(403).json({ message: "Forbidden: Lead not assigned to you" });
+          }
+        }
+
+        // ✅ Investor restriction: analysts can only link investors they can see
+        if (user.role === "analyst") {
+          for (const s of selections) {
+            const inv = await storage.getInvestorById(Number(user.organizationId), Number(s.investorId), user);
+            if (!inv) return res.status(403).json({ message: `Forbidden: investor ${s.investorId} not visible to you` });
+          }
+        }
+
+          const result = await storage.bulkLinkInvestorsToLead(
+            Number(user.organizationId),
+            leadId,
+            selections
+          );
+          
+          res.json({ success: true, count: result.count });
+        } catch (e) {
+          console.error("POST /api/leads/:leadId/link-investors error:", e);
+          res.status(500).json({ message: "Failed to link investors" });
+        }
+      }
+    );
+
+
+              // NEW: Get investors linked to a specific lead
+app.get(
+  "/api/leads/:leadId/linked-investors",
+  authMiddleware,
+  // We allow analysts/partners to see this too, not just admins
+  requireRole(["admin", "partner", "analyst"]), 
+  async (req: any, res) => {
+    try {
+      const user = req.verifiedUser;
+      if (!user?.organizationId) return res.status(401).json({ message: "Unauthorized" });
+
+      const leadId = Number(req.params.leadId);
+      if (!Number.isFinite(leadId)) {
+        return res.status(400).json({ message: "Invalid leadId" });
+      }
+
+      const investors = await storage.getInvestorsByLead(Number(user.organizationId), leadId);
+      res.json(investors);
+    } catch (e) {
+      console.error("GET /api/leads/:leadId/linked-investors error:", e);
+      res.status(500).json({ message: "Failed to fetch linked investors" });
+    }
+  }
+);
+           
+                // investor lead linkage
+              app.post(
+                    "/api/investors/:investorId/linked-leads",
+                    authMiddleware,
+                    requireRole(["admin", "partner", "analyst"]),
+                    async (req: any, res) => {
+                      try {
+                        const user = req.verifiedUser;
+                        if (!user?.organizationId) return res.status(401).json({ message: "Unauthorized" });
+
+                    
+
+                        const investorId = Number(req.params.investorId);
+                        const leadId = Number(req.body?.leadId);
+
+                        // ✅ Analyst sandbox enforcement
+                          if (user.role === "analyst") {
+                            // 1) Investor must be visible to analyst
+                            const inv = await storage.getInvestorById(Number(user.organizationId), investorId, user);
+                            if (!inv) return res.status(403).json({ message: "Forbidden: investor not visible to you" });
+
+                            // 2) Lead must be assigned to analyst
+                            const lead = await storage.getLead(leadId, Number(user.organizationId));
+                            if (!lead) return res.status(404).json({ message: "Lead not found" });
+
+                            const uid = String(user.id);
+                            const inSandbox =
+                              (lead as any).ownerAnalystId === uid ||
+                              (lead as any).assignedTo === uid ||
+                              (lead as any).createdBy === uid ||
+                              (Array.isArray((lead as any).assignedInterns) && (lead as any).assignedInterns.includes(uid));
+
+                            if (!inSandbox) {
+                              return res.status(403).json({ message: "Forbidden: lead not assigned to you" });
+                            }
+                          }
+
+                        if (!Number.isFinite(investorId) || investorId <= 0) {
+                          return res.status(400).json({ message: "Invalid investorId" });
+                        }
+                        if (!Number.isFinite(leadId) || leadId <= 0) {
+                          return res.status(400).json({ message: "Invalid leadId" });
+                        }
+
+                        const out = await storage.addInvestorLeadLink(Number(user.organizationId), investorId, leadId);
+                        res.json(out);
+                      } catch (e) {
+                        console.error("POST /api/investors/:investorId/linked-leads error:", e);
+                        res.status(500).json({ message: "Failed to link lead" });
+                      }
+                    }
+                  );
+
+
+
+                                    // routes.ts
+
+// ✅ Add this new route
+app.patch(
+  "/api/leads/:leadId/investors/:investorId/remarks",
+  authMiddleware,
+  requireRole(["admin", "partner", "analyst"]),
+  async (req: any, res) => {
+    try {
+      const user = req.verifiedUser;
+      if (!user?.organizationId) return res.status(401).json({ message: "Unauthorized" });
+
+      const leadId = Number(req.params.leadId);
+      const investorId = Number(req.params.investorId);
+      const { remarks } = req.body;
+
+      if (!Number.isFinite(leadId) || !Number.isFinite(investorId)) {
+        return res.status(400).json({ message: "Invalid IDs" });
+      }
+
+      const result = await storage.updateInvestorLeadRemarks(
+        Number(user.organizationId),
+        leadId,
+        investorId,
+        remarks || ""
+      );
+
+      res.json(result);
+    } catch (e) {
+      console.error("PATCH remarks error:", e);
+      res.status(500).json({ message: "Failed to update remarks" });
+    }
+  }
+);
+
+
+
+
+                  // ==============================
+// ==============================
+    // CSV IMPORT ROUTE (With Preview Support)
+    // ==============================
+// CSV IMPORT ROUTE (With Preview Support & Multi-POC Loop)
+    // ==============================
+// CSV IMPORT ROUTE (With Multi-POC Support)
+    // ==============================
+// CSV IMPORT ROUTE (With Preview Support & Multi-POC Loop)
+    // ==============================
+// ==============================
+    // CSV IMPORT ROUTE (With Preview Support & Multi-POC Loop)
+    // ==============================
+    const upload = multer({ storage: multer.memoryStorage() });
+
+    app.post("/api/investors/import", authMiddleware, requireRole(["admin", "partner", "analyst"]), upload.single("file"), async (req: any, res) => {
+      try {
+        if (!req.file) return res.status(400).json({ message: "No file uploaded" });
+
+        const isPreview = req.query.preview === "true";
+        const fileContent = req.file.buffer.toString("utf-8");
+        
+        // 1. Parse CSV
+        const rows = parse(fileContent, {
+          columns: true,
+          skip_empty_lines: true,
+          trim: true,
+          bom: true, 
+          relax_quotes: true,
+          relax_column_count: true 
+        }) as Record<string, any>[];
+
+        if (rows.length === 0) {
+          return res.status(400).json({ message: "CSV is empty" });
+        }
+
+        const cleanValue = (val: any) => {
+          if (!val) return "";
+          const str = String(val).trim();
+          return str.endsWith(".0") ? str.slice(0, -2) : str;
+        };
+
+        let successCount = 0;
+        const errors: any[] = [];
+        const previewData: any[] = []; 
+
+        for (let i = 0; i < rows.length; i++) {
+          const rowRaw = rows[i];
+          
+          // 2. AGGRESSIVE HEADER NORMALIZATION
+          // Converts "POC 1 Designation " to "poc1designation", "Column 1" to "column1", etc.
+          const row = Object.fromEntries(
+            Object.entries(rowRaw).map(([k, v]) => [
+              String(k).toLowerCase().replace(/[^a-z0-9]/g, ''), 
+              v
+            ])
+          );
+
+          // 3. Extract Investor Data (Checking variations from your CSVs)
+          const orgName = (row.organization || row.organisation || row.companyname || row.name || "").toString().trim();
+          
+          if (!orgName) {
+            if (!isPreview) errors.push({ row: i + 2, error: "Missing Organization/Name" });
+            continue; 
+          }
+
+          const investorData = {
+            name: orgName,
+            // Maps "Column 1" or "Investor Type" to the type field
+            investorType: (row.column1 || row.investortype || row.type || "").toString().trim(),
+            sector: (row.sector || "").toString().trim(), 
+            location: (row.location || row.city || "").toString().trim(),
+            website: (row.website || "").toString().trim(),
+            description: "Imported via CSV",
+          };
+
+          // 4. Extract Multiple POCs (Loop 1 to 20)
+          const contactsList: any[] = [];
+          
+          // Check for unnumbered generic POC first (fallback)
+          const genericName = (row.pocname || row.poc || row.name || "").toString().trim();
+          const genericEmail = (row.email || row.emailid || "").toString().trim();
+          const genericPhone = cleanValue(row.mobile || row.mobilenumber || row.phone);
+          const genericLinkedin = (row.linkedin || row.linkedinprofile || "").toString().trim();
+          
+          // Allow if ANY generic field exists
+          if ((genericName || genericEmail || genericPhone || genericLinkedin) && genericName.toLowerCase() !== orgName.toLowerCase() && !row.poc1name && !row.poc1 && !row.poc1mobilenumber) {
+             contactsList.push({
+                name: genericName || "", // ✅ Leaves name blank if not found
+                designation: (row.designation || row.pocdesignation || "Investor").toString().trim(),
+                email: genericEmail,
+                phone: genericPhone,
+                linkedinProfile: genericLinkedin,
+                isPrimary: true
+             });
+          }
+
+          // Loop for numbered POCs (handles your POC 1 Name, POC2 Name, etc.)
+          for (let j = 1; j <= 20; j++) {
+             const name = (row[`poc${j}name`] || row[`poc${j}`] || "").toString().trim();
+             const designation = (row[`poc${j}designation`] || "Investor").toString().trim();
+             const email = (row[`poc${j}email`] || row[`email${j}`] || row[`poc${j}emailid`] || "").toString().trim();
+             
+             const phoneRaw = (row[`poc${j}mobilenumber`] || row[`poc${j}mobile`] || row[`poc${j}phone`]);
+             const phone = cleanValue(phoneRaw); 
+
+             const linkedin = (row[`poc${j}linkedin`] || row[`poc${j}linkedinprofile`] || "").toString().trim();
+
+             // Check if ANY contact data exists, not just the name
+             if (name || email || phone || linkedin) {
+                contactsList.push({
+                    name: name || "", // ✅ Leaves name blank if not found
+                    designation: designation || (name ? "Investor" : "Unknown"), 
+                    email: email,
+                    phone: phone,
+                    linkedinProfile: linkedin,
+                    isPrimary: contactsList.length === 0 // First found is primary
+                });
+             }
+          }
+
+
+          // ✅ PREVIEW MODE
+          if (isPreview) {
+            previewData.push({
+              row: i + 2,
+              organization: investorData.name,
+              investorType: investorData.investorType,
+              sector: investorData.sector,
+              pocCount: contactsList.length,
+              firstPoc: contactsList[0] ? contactsList[0].name : "No POC",
+              contacts: contactsList 
+            });
+            continue;
+          }
+
+          // ✅ NORMAL MODE: Save to DB
+          try {
+            const result = await storage.createInvestorWithDeduplication(
+              req.verifiedUser.organizationId,
+              investorData as any,
+              contactsList,
+              String(req.verifiedUser.id)
+            );
+            
+            if (!result.isExisting) {
+              successCount++;
+            }
+          } catch (err: any) {
+            console.error(`Error saving row ${i + 2}:`, err);
+            errors.push({ row: i + 2, error: err.message });
+          }
+        }
+
+        if (isPreview) {
+          return res.json({ 
+            success: true, 
+            preview: true, 
+            count: previewData.length, 
+            data: previewData 
+          });
+        }
+
+        res.json({ 
+          success: true, 
+          message: `Successfully imported ${successCount} investors`,
+          errors: errors.length > 0 ? errors : undefined
+        });
+
+      } catch (error) {
+        console.error("CSV Import Error:", error);
+        res.status(500).json({ message: "Failed to import CSV" });
+      }
+    });
+
+
+                  // investor lead linkage
+                  app.delete(
+                    "/api/investors/:investorId/linked-leads/:leadId",
+                    authMiddleware,
+                    requireRole(["admin", "partner", "analyst"]),
+                    async (req: any, res) => {
+                      try {
+                        const user = req.verifiedUser;
+                        if (!user?.organizationId) return res.status(401).json({ message: "Unauthorized" });
+
+                        const investorId = Number(req.params.investorId);
+                        const leadId = Number(req.params.leadId);
+
+                        // ✅ Analyst sandbox enforcement
+                        if (user.role === "analyst") {
+                          const inv = await storage.getInvestorById(Number(user.organizationId), investorId, user);
+                          if (!inv) return res.status(403).json({ message: "Forbidden: investor not visible to you" });
+
+                          const lead = await storage.getLead(leadId, Number(user.organizationId));
+                          if (!lead) return res.status(404).json({ message: "Lead not found" });
+
+                          const uid = String(user.id);
+                          const inSandbox =
+                            (lead as any).ownerAnalystId === uid ||
+                            (lead as any).assignedTo === uid ||
+                            (lead as any).createdBy === uid ||
+                            (Array.isArray((lead as any).assignedInterns) && (lead as any).assignedInterns.includes(uid));
+
+                          if (!inSandbox) {
+                            return res.status(403).json({ message: "Forbidden: lead not assigned to you" });
+                          }
+                        }
+
+                        if (!Number.isFinite(investorId) || investorId <= 0) {
+                          return res.status(400).json({ message: "Invalid investorId" });
+                        }
+                        if (!Number.isFinite(leadId) || leadId <= 0) {
+                          return res.status(400).json({ message: "Invalid leadId" });
+                        }
+
+                        const out = await storage.removeInvestorLeadLink(Number(user.organizationId), investorId, leadId);
+                        res.json(out);
+                      } catch (e) {
+                        console.error("DELETE /api/investors/:investorId/linked-leads/:leadId error:", e);
+                        res.status(500).json({ message: "Failed to unlink lead" });
+                      }
+                    }
+                  );
+
+
+                                    // Add the PATCH route to update the status of a linked investor-lead pair
+// NEW: Update status of linked investor (Fixed syntax & permissions)
+app.patch(
+  "/api/investors/:investorId/linked-leads/:leadId/status",
+  authMiddleware,
+  requireRole(["admin", "partner", "analyst"]), // Allow analysts to update status
+  async (req: any, res) => {
+    try {
+      const user = req.verifiedUser;
+      if (!user?.organizationId) return res.status(401).json({ message: "Unauthorized" });
+
+      const investorId = Number(req.params.investorId);
+      const leadId = Number(req.params.leadId);
+      const { status } = req.body;
+
+      if (!Number.isFinite(investorId) || investorId <= 0) return res.status(400).json({ message: "Invalid investorId" });
+      if (!Number.isFinite(leadId) || leadId <= 0) return res.status(400).json({ message: "Invalid leadId" });
+      if (!status) return res.status(400).json({ message: "Status is required" });
+
+      const updated = await storage.updateInvestorLeadLinkStatus(
+        Number(user.organizationId),
+        investorId,
+        leadId,
+        status
+      );
+
+      if (updated) {
+        res.json({ message: "Status updated", status: updated.status });
+      } else {
+        res.status(404).json({ message: "Link not found" });
+      }
+    } catch (e) {
+      console.error("PATCH status error:", e);
+      res.status(500).json({ message: "Failed to update status" });
+    }
+  }
+);
+
+
+    app.post(
+      "/api/investors/:investorId/outreach-activities",
+      authMiddleware,
+      requireRole(["admin"]),
+      async (req: any, res) => {
+        const user = req.verifiedUser;
+        if (!user?.organizationId) return res.status(401).json({ message: "Unauthorized" });
+
+        const investorId = Number(req.params.investorId);
+        const { activityType, status, notes, contactDate, followUpDate } = req.body || {};
+
+        const row = await storage.createInvestorOutreachActivity(
+          Number(user.organizationId),
+          investorId,
+          {
+            userId: user.id,
+            activityType,
+            status,
+            notes: notes ?? null,
+            contactDate: contactDate ? new Date(contactDate) : null,
+            followUpDate: followUpDate ? new Date(followUpDate) : null,
+          }
+        );
+
+        res.json(row);
+      }
+    );
+
+
+
+
     // Transfer all leads from one user to another - admin/partner
     app.post('/api/users/:fromUserId/transfer-leads', authMiddleware, requireRole(['partner', 'admin']), async (req: any, res) => {
       try {
@@ -648,197 +2383,921 @@ const authMiddleware = requireSupabaseAuth;
     });
 
 
-    function parseNumber(val: string | null | undefined): number | null {
-  if (!val) return null;
-  const num = parseFloat(val);
-  return isNaN(num) ? null : num;
+    
+  const tracxnUpload = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: 15 * 1024 * 1024 }, // 15 MB
+  });
+
+    // investor multer   
+    const investorUpload = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
+  });
+
+
+
+
+function cleanStr(s: string) {
+  return (s || "")
+    // remove Tracxn icon chars
+    .replace(/[]/g, "")
+    .replace(/[\uf0d8\uf0e8]/g, "")
+
+    // ✅ Normalize common ligatures / bad chars that appear in Tracxn PDFs
+    // "Pro\u0000t" or "Pro� t" etc -> "Profit"
+    .replace(/Pro[\u0000\uFFFD\s]*t/gi, "Profit")
+    // Unicode "fi" ligature (ﬁ) / "fl" (ﬂ)
+    .replace(/\uFB01/g, "fi")
+    .replace(/\uFB02/g, "fl")
+
+    // remove remaining null chars
+    .replace(/\u0000/g, "")
+
+    .replace(/[ \t]+/g, " ")
+    .trim();
 }
 
 
+function pickCrNumbers(line: string): number[] {
+  const matches = [...line.matchAll(/(\(?-?\d[\d,]*(?:\.\d+)?\)?)\s*(?:Cr|Crore|INR\s*Cr)\b/gi)];
+  const nums = matches.map(m => {
+    let s = m[1].replace(/,/g, "");
+    const isParen = s.startsWith("(") && s.endsWith(")");
+    s = s.replace(/[()]/g, "");
+    const n = parseFloat(s);
+    return isParen ? -n : n;
+  });
+  return nums.filter(n => Number.isFinite(n));
+}
+
+function pickFirstCrNumber(line: string): number | null {
+  const nums = pickCrNumbers(line);
+  return nums.length ? nums[0] : null;     // ✅ FY24 (latest) is first
+}
+
+function pickLastCrNumber(line: string): number | null {
+  const nums = pickCrNumbers(line);
+  return nums.length ? nums[nums.length - 1] : null;
+}
+
+function pickMetricFromSummaryRow(text: string, rowLabel: RegExp): number | null {
+  const lines = text.split(/\r?\n/).map(l => cleanStr(l)).filter(Boolean);
+
+  // Find the "Summary" section (Tracxn prints the table under this)
+  const summaryIdx = lines.findIndex(l => /^Summary$/i.test(l));
+  const start = summaryIdx >= 0 ? summaryIdx : 0;
+
+  for (let i = start; i < Math.min(lines.length, start + 200); i++) {
+    const l = lines[i];
+
+    // Stop if we go into other sections after the table
+    if (/^(Balance\s*Sheet|Cash\s*flow\s*Statement|CashflowStatement|View detailed financials|Legal Entity:)/i.test(l)) break;
+
+    // Match row like: "EBITDA 157.2Cr 156.9Cr ..."
+    if (!rowLabel.test(l)) continue;
+
+    // Prefer first "Cr" number (FY23-24 column is first in Tracxn export)
+    const firstCr = pickFirstCrNumber(l);
+    if (firstCr !== null) return firstCr;
+
+    // Fallback if "Cr" missing (rare): first non-year number
+    const n = pickFirstNonYearNumber(l);
+    return n !== null ? n : null;
+  }
+
+  return null;
+}
+function pickMetricRowFirstCr(text: string, rowLabel: RegExp): number | null {
+  const lines = text.split(/\r?\n/).map(l => cleanStr(l)).filter(Boolean);
+
+  // Try starting from "Summary" (best case), else scan whole doc
+  const summaryIdx = lines.findIndex(l => /^Summary$/i.test(l));
+  const start = summaryIdx >= 0 ? summaryIdx : 0;
+
+  // Scan a bounded window if Summary exists, else scan all lines
+  const end = summaryIdx >= 0 ? Math.min(lines.length, start + 250) : lines.length;
+
+  for (let i = start; i < end; i++) {
+    const l = lines[i];
+
+    // stop when table ends
+    if (/^(Balance Sheet|CashflowStatement|Cash Flow|View detailed financials|Legal Entity:)/i.test(l)) break;
+
+    if (!rowLabel.test(l)) continue;
+
+    // Prefer first Cr number on the row
+    const vCr = pickFirstCrNumber(l);
+    if (vCr !== null) return vCr;
+
+    // fallback: first non-year number
+    const v = pickFirstNonYearNumber(l);
+    if (v !== null) return v;
+  }
+
+  // If "Summary" scan didn’t find it, fallback: scan whole doc
+  if (summaryIdx >= 0) {
+    for (const l of lines) {
+      if (!rowLabel.test(l)) continue;
+      const vCr = pickFirstCrNumber(l);
+      if (vCr !== null) return vCr;
+      const v = pickFirstNonYearNumber(l);
+      if (v !== null) return v;
+    }
+  }
+
+  return null;
+}
+
+
+function pickBestLineWithCr(text: string, labelRegex: RegExp): string {
+  const lines = text.split(/\r?\n/).map(l => cleanStr(l)).filter(Boolean);
+  const matches = lines.filter(l => labelRegex.test(l));
+  if (!matches.length) return "";
+  // Prefer the INR (Cr) line, not the USD "Net Profit: 12.3M..." line
+  const withCr = matches.find(l => /\bCr\b/i.test(l));
+  return withCr || matches[0];
+}
+
+function pickFirstCrAfterLabel(text: string, labelRegex: RegExp, lookahead = 20): number | null {
+  const lines = text.split(/\r?\n/).map(l => cleanStr(l)).filter(Boolean);
+
+  for (let i = 0; i < lines.length; i++) {
+    if (!labelRegex.test(lines[i])) continue;
+
+    // 1) same line
+    const same = pickFirstCrNumber(lines[i]);
+    if (same !== null) return same;
+
+    // 2) scan next N lines (Tracxn tables often print values on following lines)
+    for (let j = i + 1; j < Math.min(lines.length, i + 1 + lookahead); j++) {
+      const v = pickFirstCrNumber(lines[j]);
+      if (v !== null) return v;
+      // stop early if we hit another section header
+      if (/^(Income Statement|Balance Sheet|Cash Flow|Key Metrics|Founder|Primary Legal Entity)/i.test(lines[j])) break;
+    }
+  }
+
+  return null;
+}
+function pickFirstNumber(line: string): number | null {
+  const m = cleanStr(line).match(/(-?\d[\d,]*(?:\.\d+)?)/);
+  if (!m) return null;
+
+  const n = parseFloat(m[1].replace(/,/g, ""));
+  if (!Number.isFinite(n)) return null;
+
+  // ❗ avoid year-like values (2024, 2023 etc.)
+  if (Number.isInteger(n) && n >= 1900 && n <= 2100) return null;
+
+  return n;
+}
+
+function pickLastNumber(line: string): number | null {
+  const ms = [...cleanStr(line).matchAll(/(-?\d[\d,]*(?:\.\d+)?)/g)];
+  if (!ms.length) return null;
+  const s = ms[ms.length - 1][1].replace(/,/g, "");
+  const n = parseFloat(s);
+  return Number.isFinite(n) ? n : null;
+}
+function pickFirstNonYearNumber(line: string): number | null {
+  const nums = [...cleanStr(line).matchAll(/(-?\d[\d,]*(?:\.\d+)?)/g)]
+    .map(m => parseFloat(m[1].replace(/,/g, "")))
+    .filter(n => Number.isFinite(n));
+
+  // remove year-like numbers (1900–2099)
+  const filtered = nums.filter(n => !(n >= 1900 && n <= 2099));
+
+  return filtered.length ? filtered[0] : null;
+}
+
+/**
+ * v1-friendly:
+ * Finds a label (EBITDA/PAT) then extracts a reasonable number even if "Cr" is missing.
+ */
+function pickNumberAfterLabel(
+  text: string,
+  labelRegex: RegExp,
+  lookahead = 25
+): number | null {
+  const lines = text.split(/\r?\n/).map(l => cleanStr(l)).filter(Boolean);
+
+  const isYear = (n: number) =>
+    Number.isFinite(n) && Math.floor(n) === n && n >= 1900 && n <= 2100;
+
+  const isFYLine = (l: string) =>
+    /\bFY\s?\d{2,4}\b/i.test(l) || /\b20\d{2}\b/.test(l) && /\bFY\b/i.test(l);
+
+  for (let i = 0; i < lines.length; i++) {
+    if (!labelRegex.test(lines[i])) continue;
+
+    // Collect candidate numbers (prefer Cr numbers, else normal numbers)
+    const candidates: number[] = [];
+
+    // 1) same line
+  const sameLine = lines[i];
+
+  // Skip USD/million style lines like: "NetProfit: 12.3M (as on Mar 31, 2024)"
+  const looksUSDorMillion =
+    /\bUSD\b/i.test(sameLine) ||
+    /\$\s*/.test(sameLine) ||
+    /\b\d+(?:\.\d+)?\s*M\b/i.test(sameLine) ||
+    /Latest Financials\s*\(USD\)/i.test(sameLine);
+
+  if (!isFYLine(sameLine) && !(looksUSDorMillion && !/\bCr\b/i.test(sameLine))) {
+    const cr = pickFirstCrNumber(sameLine);
+    if (cr !== null && !isYear(cr)) candidates.push(cr);
+
+    const n = pickFirstNonYearNumber(sameLine);
+    if (n !== null) candidates.push(n);
+  }
+
+    // 2) next lines
+    for (let j = i + 1; j < Math.min(lines.length, i + 1 + lookahead); j++) {
+      const l = lines[j];
+
+      // stop early if next section starts
+      if (/^(Income Statement|Balance Sheet|Cash Flow|Key Metrics|Founder|Primary Legal Entity|Company Details)/i.test(l)) {
+        break;
+      }
+
+      // skip FY/year-heavy lines
+      if (isFYLine(l)) continue;
+      // Skip USD/million lines (avoid grabbing 12.3 from 12.3M)
+      const looksUSDorMillion =
+        /\bUSD\b/i.test(l) ||
+        /\$\s*/.test(l) ||
+        /\b\d+(?:\.\d+)?\s*M\b/i.test(l) ||
+        /Latest Financials\s*\(USD\)/i.test(l);
+
+      if (looksUSDorMillion && !/\bCr\b/i.test(l)) continue;
+
+
+      const vCr = pickFirstCrNumber(l);
+      if (vCr !== null && !isYear(vCr)) candidates.push(vCr);
+
+      const v = pickFirstNonYearNumber(l);
+      if (v !== null) candidates.push(v);
+
+      // if we already found something reasonable, return early
+      if (candidates.length) return candidates[0];
+    }
+
+    if (candidates.length) return candidates[0];
+  }
+
+  return null;
+}
+
+
+function pickEmail(text: string): string | null {
+  const m = text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+  return m ? m[0] : null;
+}
+
+function pickPhone(text: string): string | null {
+  // Loose phone match; filters by digit count
+  const m = text.match(/(\+?\d[\d\s().-]{8,}\d)/);
+  if (!m) return null;
+
+  const raw = cleanStr(m[1]);
+  const digits = raw.replace(/\D/g, "");
+  if (digits.length < 10) return null;
+
+  return raw;
+}
+
+
+function pickKeyPersons(text: string): string | null {
+  const lines = text.split(/\r?\n/).map(l => cleanStr(l)).filter(Boolean);
+
+  const startIdx = lines.findIndex(l => /^Founder\s*&\s*Key\s*People/i.test(l));
+  if (startIdx < 0) return null;
+
+  const out: string[] = [];
+
+  for (let i = startIdx + 1; i < Math.min(lines.length, startIdx + 30); i++) {
+    const l = lines[i];
+
+    if (/^Primary Legal Entity/i.test(l)) break;
+    if (/^Name\s+Designation/i.test(l)) continue;
+    if (!l || l === "-") continue;
+
+    // Try to convert: "B V Hegde ex-Co-Founder -" -> "B V Hegde – ex-Co-Founder"
+    const mm = l.match(/^(.+?)\s+(ex-?co-founder|co-founder|founder|ceo|cfo|cto|coo|managing director|md|director|partner|chairman)\b/i);
+    if (mm) {
+      out.push(`${cleanStr(mm[1])} – ${cleanStr(mm[2])}`);
+      continue;
+    }
+
+    // fallback: keep line if it's short and looks like a person entry
+    if (l.length <= 80 && /[A-Za-z]/.test(l) && !/Description$/i.test(l)) {
+      out.push(l);
+    }
+  }
+
+  const uniq = Array.from(new Set(out)).filter(Boolean);
+  return uniq.length ? uniq.join(", ") : null;
+}
+
+function pickAnnualRevenueCr(text: string): number | null {
+  const m = text.match(/Annual Revenue\s*₹\s*([\d.,]+)\s*Cr/i);
+  if (!m) return null;
+  const num = parseFloat(m[1].replace(/,/g, ""));
+  return Number.isFinite(num) ? num : null;
+}
+
+function pickWebsite(text: string): string | null {
+  // tries to catch a domain or URL near "Website"
+  const m =
+    text.match(/Website\s*(https?:\/\/[^\s]+|\b[a-z0-9.-]+\.[a-z]{2,}\b)/i) ||
+    text.match(/www\.[a-z0-9.-]+\.[a-z]{2,}/i);
+  if (!m) return null;
+
+  const raw = m[1] || m[0];
+  const site = raw.startsWith("http") ? raw : `https://${raw}`;
+  return site;
+}
+
+function pickLocationCity(text: string): string | null {
+  const t = cleanStr(text);
+
+  // Most common: "1996|Mumbai (India)|Unfunded..." OR "1996 | Mumbai (India) | Unfunded..."
+  let m = t.match(/\b(19|20)\d{2}\b\s*\|\s*([^|]+?)\s*\|/);
+  if (m?.[2]) {
+    const loc = cleanStr(m[2]);
+    return cleanStr(loc.split("(")[0]); // "Mumbai (India)" -> "Mumbai"
+  }
+
+  // Fallback: "1996 Mumbai (India) Unfunded"
+  m = t.match(/\b(19|20)\d{2}\b\s+([A-Za-z][A-Za-z .&-]+?)\s*\(India\)/);
+  if (m?.[2]) {
+    return cleanStr(m[2]);
+  }
+
+  return null;
+}
+
+
+function pickCompanyName(text: string): string | null {
+  const lines = text.split(/\r?\n/).map(l => cleanStr(l)).filter(Boolean);
+  if (!lines.length) return null;
+  return lines[0];
+}
+
+function pickBusinessDescription(text: string): string | null {
+  const lines = text.split(/\r?\n/).map(l => cleanStr(l)).filter(Boolean);
+  if (!lines.length) return null;
+
+  const noise = /(Tracxn Score|Annual Revenue|Employee Count|Similar Companies|Website Screenshot|Income Statement|Balance Sheet|Financial Statement|News on|Key Metrics|Sectors|Company Details|Associated Legal Entities|Coverage Areas)/i;
+
+  // Prefer a clean descriptive line like "Manufacturer of ...", "Provider of ...", etc.
+  const descKeyword = /(manufacturer|provider|developer|operator|supplier|distributor|platform|saas|hospital|clinic|diagnostic)/i;
+
+  for (let i = 0; i < Math.min(lines.length, 40); i++) {
+    const l = lines[i];
+    if (noise.test(l)) continue;
+    if (/^\b(19|20)\d{2}\b\s*\|/i.test(l)) continue; // founded|city|...
+    if (/^https?:\/\//i.test(l)) continue;
+    if (descKeyword.test(l)) {
+      // Cut off any accidental trailing junk on the same line
+      let out = l;
+
+      const cutAt = [
+        /\b(19|20)\d{2}\b\s*\|/i,
+        /\bTracxn Score\b/i,
+        /\bAnnual Revenue\b/i,
+        /\bEmployee Count\b/i,
+      ];
+
+      for (const p of cutAt) {
+        const idx = out.search(p);
+        if (idx >= 0) out = out.slice(0, idx);
+      }
+
+      out = cleanStr(out);
+      if (out.length >= 10 && out.length <= 180) return out;
+    }
+  }
+
+  return null;
+}
+
+
+function pickSectorPath(text: string): string | null {
+  const lines = text.split(/\r?\n/).map(l => cleanStr(l)).filter(Boolean);
+
+  // 1) Best case: any line like "A > B > C" (Tracxn sector breadcrumb)
+  const direct = lines.find(l =>
+    /[>›»→]/.test(l) &&
+    !/^https?:\/\//i.test(l) &&
+    !/^(Sectors?|Company Details|Associated Legal Entities|Coverage Areas)/i.test(l) &&
+    l.length <= 220
+  );
+
+  if (direct) {
+    return cleanStr(direct.replace(/^[^A-Za-z0-9]+/, "")); // strip leading icons like 
+  }
+
+  // 2) Common format: right after "YYYY|City (India)|Funding"
+  const foundedIdx = lines.findIndex(l => /\b(19|20)\d{2}\b\s*\|/.test(l) && /\|/.test(l));
+  if (foundedIdx >= 0) {
+    for (let j = foundedIdx + 1; j < Math.min(lines.length, foundedIdx + 7); j++) {
+      const l = lines[j];
+      if (/[>›»→]/.test(l) && !/^https?:\/\//i.test(l) && l.length <= 220) {
+        return cleanStr(l.replace(/^[^A-Za-z0-9]+/, ""));
+      }
+      if (/^Website\b/i.test(l)) break;
+    }
+  }
+
+  // 3) Fallback regex over full text
+  const m = text.match(
+    /(?:Healthcare|Logistics|Renewables?|Consumer|IT|Software|SaaS|Pharma|Pharmaceuticals|Chemicals|Materials)\b\s*(?:[>›»→]\s*[^\n]{2,})+/i
+  );
+  if (m) return cleanStr(m[0].replace(/^[^A-Za-z0-9]+/, ""));
+
+  return null;
+}
+
+
+function splitSectorPath(path: string): string[] {
+  return cleanStr(path)
+    .replace(/^[^A-Za-z0-9]+/, "")          // remove leading icons
+    .split(/\s*[>›»→]\s*/g)                // support different separators
+    .map(s => cleanStr(s))
+    .filter(Boolean);
+}
+
+function mapSectorAndSubSector(sectorPath: string | null): { sector?: string; subSector?: string } {
+  if (!sectorPath) return {};
+
+  const parts = splitSectorPath(sectorPath);
+  if (!parts.length) return {};
+
+  const primary = parts[0];                         // first segment
+  const rest = parts.slice(1).join(" > ");          // everything after
+
+  const sp = sectorPath.toLowerCase();
+
+  if (sp.includes("pharma") || sp.includes("pharmaceutical") || sp.includes("healthcare")) {
+    return { sector: "Healthcare & Pharma", subSector: rest || primary };
+  }
+  if (sp.includes("logistics")) return { sector: "Logistics", subSector: rest || primary };
+  if (sp.includes("renewable") || sp.includes("solar") || sp.includes("energy")) return { sector: "Renewables", subSector: rest || primary };
+  if (sp.includes("consumer") || sp.includes("retail") || sp.includes("f&b")) return { sector: "Consumer", subSector: rest || primary };
+  if (sp.includes("it") || sp.includes("software") || sp.includes("saas")) return { sector: "IT", subSector: rest || primary };
+  if (sp.includes("staffing") || sp.includes("recruit") || sp.includes("manpower") || sp.includes("hr")) return { sector: "HR", subSector: rest || primary };
+
+  // Generic fallback: sector = first segment, sub-sector = remaining breadcrumb
+  return { sector: primary, subSector: rest || undefined };
+}
+
+
+function parseTracxnOnePager(textRaw: string) {
+  const text = textRaw || "";
+
+  const companyName = pickCompanyName(text);
+  const location = pickLocationCity(text);
+  const businessDescription = pickBusinessDescription(text);
+  const website = pickWebsite(text);
+  const email = pickEmail(text);
+  const phone = pickPhone(text);
+  const keyPersons = pickKeyPersons(text);
+
+
+  const revenueInrCr = pickAnnualRevenueCr(text);
+
+  // EBITDA + PAT from financial statement rows (prefer INR Cr lines)
+  // ✅ EBITDA + PAT: handle Tracxn tables where values come on next lines
+// ✅ EBITDA + PAT: v1-safe (works even if "Cr" is missing)
+// ✅ Prefer INR "Summary" table rows first (most reliable in Tracxn exports)
+const ebitdaFromSummary = pickMetricFromSummaryRow(text, /^EBITDA\b/i);
+const netProfitFromSummary =
+  pickMetricFromSummaryRow(text, /^Net\s*Profit\b/i) ??
+  pickMetricFromSummaryRow(text, /^NetProfit\b/i);
+
+// Fallbacks (only if Summary not found)
+const ebitdaInrCr =
+  ebitdaFromSummary ??
+  pickNumberAfterLabel(text, /^EBITDA\b/i) ??
+  pickFirstCrAfterLabel(text, /^EBITDA\b/i) ??
+  pickFirstCrNumber(pickBestLineWithCr(text, /^EBITDA\b/i));
+
+const PAT_LABEL = /\b(Net\s*Profit(?:\/Loss)?|NetProfit|PAT)\b/i;
+
+
+const patInrCr =
+  netProfitFromSummary ??
+  pickNumberAfterLabel(text, PAT_LABEL) ??
+  pickFirstCrAfterLabel(text, PAT_LABEL) ??
+  pickFirstCrNumber(pickBestLineWithCr(text, PAT_LABEL));
+
+
+
+
+
+  const sectorPath = pickSectorPath(text);
+  const { sector, subSector } = mapSectorAndSubSector(sectorPath);
+
+  return {
+    companyName,
+    sector: sector || null,
+    subSector: subSector || null,
+    location: location || null,
+    website: website || null,
+    businessDescription: businessDescription || null,
+    revenueInrCr: revenueInrCr ?? null,
+    ebitdaInrCr: ebitdaInrCr ?? null,
+    patInrCr: patInrCr ?? null,
+
+    // useful extras from Tracxn (optional)
+    keyPersons: keyPersons || null,
+    email: email || null,
+    phone: phone || null,
+
+    // for debugging (optional)
+    sectorPath: sectorPath || null,
+  };
+}
+
+    function parseNumber(val: string | null | undefined): number | null {
+      if (!val) return null;
+      const num = parseFloat(val);
+      return isNaN(num) ? null : num;
+    }
+
+
+
+
+// investro routes //
+    app.post(
+      "/api/investors/import",
+      authMiddleware,
+      requireRole(["admin"]),
+      investorUpload.single("file"),
+      async (req: any, res) => {
+        try {
+          const user = req.verifiedUser;
+          if (!user?.organizationId) return res.status(401).json({ message: "Unauthorized" });
+
+          if (!req.file?.buffer) {
+            return res.status(400).json({ message: "No file uploaded" });
+          }
+
+          const csvText = req.file.buffer.toString("utf-8");
+            type InvestorCsvRow = {
+              name?: string;
+              sector?: string;
+              location?: string;
+              website?: string;
+              description?: string;
+              pocName?: string;
+              pocDesignation?: string;
+              pocEmail?: string;
+              pocPhone?: string;
+              pocLinkedin?: string;
+            };
+
+            const records = parse(csvText, {
+              columns: true,
+              skip_empty_lines: true,
+              trim: true,
+              bom: true,
+            }) as InvestorCsvRow[];
+
+
+          // Expected headers:
+          // name, sector, location, website, description,
+          // pocName, pocDesignation, pocEmail, pocPhone, pocLinkedin
+
+          let created = 0;
+
+          for (const row of records) {
+            const name = String(row.name ?? "").trim();
+            if (!name) continue;
+
+            await storage.createInvestor(
+              user.organizationId,
+              {
+                name,
+                sector: row.sector || null,
+                location: row.location || null,
+                website: row.website || null,
+                description: row.description || null,
+                stage: "outreach",
+              } as any,
+              {
+                name: row.pocName || "",
+                designation: row.pocDesignation || "",
+                email: row.pocEmail || "",
+                phone: row.pocPhone || "",
+                linkedinProfile: row.pocLinkedin || "",
+              }
+            );
+
+            created += 1;
+          }
+
+          res.json({ message: "Import successful", created });
+        } catch (e) {
+          console.error("POST /api/investors/import error:", e);
+          res.status(500).json({ message: "Failed to import investors" });
+        }
+      }
+    );
+
+
+
+   // -----------------------------
+// Tracxn PDF parse endpoint
+// POST /api/tracxn/parse-onepager
+// -----------------------------
 app.post(
-  '/api/companies/csv-upload',
+  "/api/tracxn/parse-onepager",
   authMiddleware,
-  requireRole(['partner', 'admin', 'analyst']),
+  requireRole(["partner", "admin", "analyst", "intern"]),
+  tracxnUpload.single("file"),
+
+  async (req: any, res) => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({ message: "PDF file is required (field name: file)" });
+      }
+
+      const text = await extractPdfText(req.file.buffer);
+      const extracted = parseTracxnOnePager(text || "");
+
+
+      return res.json({ success: true, extracted });
+    } catch (err: any) {
+      console.error("Tracxn parse failed:", err);
+      return res.status(500).json({ message: err?.message || "Failed to parse Tracxn PDF" });
+    }
+  }
+);
+
+app.post(
+  "/api/companies/csv-upload",
+  authMiddleware,
+  requireRole(["partner", "admin", "analyst"]),
   async (req: any, res) => {
     try {
       const currentUser = req.verifiedUser;
       if (!currentUser || !currentUser.organizationId) {
-        return res.status(401).json({ message: 'User organization not found' });
+        return res.status(401).json({ message: "User organization not found" });
       }
 
       const { csvData } = req.body;
-      if (!csvData || typeof csvData !== 'string') {
-        return res.status(400).json({ message: 'CSV data is required' });
+      if (!csvData || typeof csvData !== "string") {
+        return res.status(400).json({ message: "CSV data is required" });
       }
-      console.log('========================================');  
-      console.log('Received CSV data for upload');
-      console.log('========================================');  
-
 
       const organizationId = currentUser.organizationId;
-      const lines = csvData.split('\n').filter((line) => line.trim());
-      if (lines.length < 2) {
-        return res
-          .status(400)
-          .json({ message: 'CSV must contain header row and at least one data row' });
+
+      // ✅ robust number parsing
+      function parseNumber(val: any): number | null {
+        if (val === null || val === undefined) return null;
+        const s = String(val).trim();
+        if (!s || s.toLowerCase() === "na" || s.toLowerCase() === "n/a") return null;
+        // remove currency symbols/commas
+        const cleaned = s.replace(/₹/g, "").replace(/,/g, "").trim();
+        const num = Number(cleaned);
+        return Number.isFinite(num) ? num : null;
       }
 
-      const headers = lines[0].split(',').map((h) => h.replace(/"/g, '').trim());
+      const rows = parse(csvData, {
+        columns: true,           // uses headers as keys
+        skip_empty_lines: true,
+        bom: true,               // handles BOM in CSVs from Excel/Sheets
+        relax_quotes: true,
+        relax_column_count: true // ignores extra columns
+      }) as Record<string, any>[];
+      console.log("[csv-upload] using csv-parse ✅ rows:", rows.length);
+
+      const nonEmptyRows = rows.filter((r) =>
+        Object.values(r || {}).some((v) => String(v ?? "").trim() !== "")
+      );
+
+      if (nonEmptyRows.length === 0) {
+        return res.status(400).json({ message: "CSV must contain at least one data row" });
+      }
+
+
+      // optional safety cap
+      const MAX_ROWS = 5000;
+      if (rows.length > MAX_ROWS) {
+        return res.status(400).json({ message: `Too many rows. Max allowed is ${MAX_ROWS}.` });
+      }
+
+      // ✅ preload users for assignment matching (once)
+      const orgUsers = await storage.getUsers(organizationId);
+      const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
+
+      const userByEmail = new Map<string, string>();
+      const userByName = new Map<string, string>();
+
+      for (const u of orgUsers) {
+        if (u.email) userByEmail.set(norm(u.email), u.id);
+        const full = norm(`${u.firstName || ""} ${u.lastName || ""}`.trim());
+        if (full) userByName.set(full, u.id);
+      }
+      
       const results = {
-        totalRows: lines.length - 1,
+        totalRows: rows.length,
         successfulCompanies: 0,
         successfulLeads: 0,
         successfulContacts: 0,
+        warnings: [] as Array<{ row: number; warning: string }>,
         errors: [] as Array<{ row: number; error: string }>,
       };
-      const createdCompanyIds: number[] = [];
 
-      // Process each data row
-      for (let i = 1; i < lines.length; i++) {
+      for (let i = 0; i < rows.length; i++) {
+        const rowNum = i + 2; // header is row 1
         try {
-          const values = lines[i].split(',').map((v) => v.replace(/"/g, '').trim());
-          if (values.length !== headers.length) {
-            results.errors.push({ row: i + 1, error: 'Column count mismatch' });
-            continue;
-          }
-          console.log('Processing CSV row:', i + 1, values);
+          const rowRaw = rows[i] || {};
 
-        const companyData = {
-  name: values[0] || '',
-  sector: values[1] || null,
-  subSector: values[2] || null,
-  location: values[3] || null,
-  foundedYear: parseNumber(values[4]),
-  businessDescription: values[5] || null,
-  products: values[6] || null,
-  website: values[7] || null,
-  industry: values[8] || null,
-  financialYear: values[9] || null,
-  revenueInrCr: parseNumber(values[10]),
-  ebitdaInrCr: parseNumber(values[11]),
-  patInrCr: parseNumber(values[12])
-};
+          // ✅ Normalize headers (trim, collapse spaces, remove \n)
+          const row = Object.fromEntries(
+            Object.entries(rowRaw).map(([k, v]) => [String(k).replace(/\s+/g, " ").trim(), v])
+          ) as Record<string, any>;
 
-
-          if (!companyData.name) {
-            results.errors.push({ row: i + 1, error: 'Company name is required' });
-            continue;
-          }
-          if (!companyData.sector) {
-            results.errors.push({ row: i + 1, error: 'Sector is required' });
+          // ---- Company mapping by header name (extra columns ignored automatically)
+          const companyName = (row["Company Name"] ?? row["Company"] ?? row["Name"] ?? "").toString().trim();
+          if (!companyName) {
+            results.errors.push({ row: rowNum, error: "Company Name is required" });
             continue;
           }
 
-          // Create company with deduplication
-          const companyResult = await storage.createCompanyWithDeduplication(
-            companyData,
-            organizationId
-          );
-          const company = companyResult.company;
-          const isExisting = companyResult.isExisting;
-          if (!isExisting) {
-            results.successfulCompanies++;
-            createdCompanyIds.push(company.id);
-          }
-
-          // Determine universe status
-          const assignedTo =  null;
-          const universeStatus = assignedTo ? 'assigned' : 'open';
-          const ownerAnalystId =
-            currentUser.role === 'analyst' ? currentUser.id : null;
-
-          // Create lead for this company (same as individual route)
-          const lead = await storage.createLead({
-            organizationId,
-            companyId: Number(company.id),
-            stage: 'universe',
-            universeStatus,
-            ownerAnalystId,
-         assignedTo: assignedTo || null, 
-            pocCount: 0,
-            pocCompletionStatus: 'red',
-            pipelineValue: null,
-            probability: '0',
-            notes: null,
-          });
-          results.successfulLeads++;
-
-          // Activity logs (optional best-effort)
-          try {
-            if (!isExisting) {
-              await ActivityLogService.logCompanyCreated(
-                organizationId,
-                currentUser.id,
-                company.id,
-                company.name
-              );
-            }
-
-            await ActivityLogService.logLeadCreated(
-              organizationId,
-              currentUser.id,
-              lead.id,
-              company.id,
-              company.name,
-              'universe'
-            );
-
-            if (assignedTo) {
-              const assignedUser = await storage.getUser(assignedTo);
-              const assignedToName = assignedUser
-                ? `${assignedUser.firstName || ''} ${assignedUser.lastName || ''}`.trim() ||
-                  assignedUser.email
-                : undefined;
-
-              await ActivityLogService.logLeadAssigned(
-                organizationId,
-                currentUser.id,
-                lead.id,
-                company.id,
-                company.name,
-                assignedTo,
-                assignedToName
-              );
-            }
-          } catch (logError) {
-            console.error('Error logging activity for CSV row:', i + 1, logError);
-          }
-
-          // Extract and create contact
-          const contactData = {
-            organizationId,
-            companyId: company.id,
-            name: values[13] || null,
-            designation: values[14] || null,
-            email: values[15] || null,
-            phone: values[16] || null,
-            linkedinProfile: values[17] || null,
-            isPrimary: true,
+          const companyData: any = {
+            name: companyName,
+            sector: (row["Sector"] ?? null)?.toString().trim() || null,
+            subSector: (row["Sub-Sector"] ?? row["Sub Sector"] ?? null)?.toString().trim() || null,
+            location: (row["City"] ?? row["Location"] ?? null)?.toString().trim() || null,
+            // FY fields (based on your CSV)
+            financialYear: "FY24",
+            revenueInrCr: parseNumber(row["FY24 Revenue (INR Cr)"]),
+            ebitdaInrCr: parseNumber(row["FY24 EBITDA (INR Cr)"]),
+            patInrCr: parseNumber(row["FY24 PAT (INR Cr)"]),
+            // not present in your CSV, keep null
+            foundedYear: null,
+            businessDescription: null,
+            products: null,
+            website: null,
+            industry: null,
           };
 
-          if (contactData.name || contactData.email || contactData.phone) {
-            await storage.createContact(contactData);
-            results.successfulContacts++;
+          // ✅ Create company with dedupe
+          const companyResult = await storage.createCompanyWithDeduplication(companyData, organizationId);
+          const company = companyResult.company;
+          const companyIdNum = Number(company.id);
+          const isExisting = companyResult.isExisting;
+
+          if (!isExisting) results.successfulCompanies++;
+
+          // ---- Assignment from CSV ("Analyst PoC SFCA")
+          let assignedTo: string | null = null;
+          const analystCell = (row["Analyst PoC SFCA"] ?? "").toString().trim();
+          if (analystCell && analystCell.toLowerCase() !== "na" && analystCell.toLowerCase() !== "n/a") {
+            const asEmail = norm(analystCell);
+            const asName = norm(analystCell);
+
+            assignedTo = userByEmail.get(asEmail) || userByName.get(asName) || null;
+
+            if (!assignedTo) {
+              results.warnings.push({
+                row: rowNum,
+                warning: `Assignee not found in CRM users: "${analystCell}". Lead left unassigned.`,
+              });
+            }
           }
+
+          // ---- Lead: create only if it doesn't exist for this company in this org
+          const existingLeads = await storage.getLeadsByCompany(companyIdNum, organizationId);
+          let leadId: number | null = null;
+
+          if (!existingLeads || existingLeads.length === 0) {
+            const universeStatus = assignedTo ? "assigned" : "open";
+
+            const lead = await storage.createLead({
+              organizationId,
+              companyId: Number(company.id),
+              stage: "universe",
+              universeStatus,
+              ownerAnalystId: assignedTo || (currentUser.role === "analyst" ? currentUser.id : null),
+              assignedTo: assignedTo,
+              pocCount: 0,
+              pocCompletionStatus: "red",
+              pipelineValue: null,
+              probability: "0",
+              notes: null,
+              createdBy: currentUser.id,
+            });
+
+            leadId = lead.id;
+            results.successfulLeads++;
+          } else {
+            // Optional: if universe lead exists and is unassigned, assign it now
+            const lead = existingLeads[0];
+            leadId = lead.id;
+
+            if (assignedTo && !lead.assignedTo && lead.stage === "universe") {
+              await storage.assignLead(
+                lead.id,
+                organizationId,
+                assignedTo,
+                undefined,
+                currentUser.id,
+                "Assigned from CSV upload"
+              );
+            }
+          }
+
+          // ---- Contacts: up to 2 from your file (POC 1 primary, POC 2 secondary)
+          const existingContacts = await storage.getContactsByCompany(companyIdNum, organizationId);
+
+          const upsertContact = async (
+            incoming: any,
+            isPrimary: boolean
+          ) => {
+            const hasAny =
+              incoming.name || incoming.email || incoming.phone || incoming.linkedinProfile || incoming.designation;
+
+            if (!hasAny) return;
+
+            // find match: primary uses isPrimary, secondary uses email/phone match
+            let match = null as any;
+
+            if (isPrimary) {
+              match = existingContacts.find((c: any) => c.isPrimary);
+            } else {
+              const emailKey = incoming.email ? norm(incoming.email) : null;
+              const phoneKey = incoming.phone ? incoming.phone.toString().trim() : null;
+
+              match = existingContacts.find((c: any) => {
+                const cEmail = c.email ? norm(c.email) : null;
+                const cPhone = c.phone ? c.phone.toString().trim() : null;
+                return (emailKey && cEmail === emailKey) || (phoneKey && cPhone === phoneKey);
+              });
+            }
+
+            // update only with non-empty values
+            const patch: any = {};
+            for (const k of ["name", "designation", "email", "phone", "linkedinProfile"] as const) {
+              if (incoming[k]) patch[k] = incoming[k];
+            }
+            patch.isPrimary = isPrimary;
+
+            if (match) {
+              await storage.updateContact(match.id, organizationId ,patch);
+              // not counted as "created"
+            } else {
+              await storage.createContact({
+                organizationId,
+                companyId: companyIdNum,
+                ...patch,
+                isPrimary,
+              });
+              results.successfulContacts++;
+            }
+          };
+
+          const poc1 = {
+          name: (row["POC 1 Name"] ?? "").toString().trim() || null,
+          designation: (row["POC 1 Designation"] ?? "").toString().trim() || null, // if not present, stays null
+          email: (row["Email ID 1"] ?? row["Primary Contact Email"] ?? "").toString().trim() || null,
+          phone: (row["Phone Number 1"] ?? row["Primary Contact Phone"] ?? "").toString().trim() || null,
+          linkedinProfile: (row["LinkedIn 1"] ?? row["Primary Contact LinkedIn"] ?? "").toString().trim() || null,
+        };
+
+        const poc2 = {
+          name: (row["POC Name 2"] ?? row["POC 2 Name"] ?? "").toString().trim() || null,
+          designation: (row["POC 2 Designation"] ?? "").toString().trim() || null,
+          email: (row["Email ID 2"] ?? "").toString().trim() || null,
+          phone: (row["POC 2 Number"] ?? row["Phone Number 2"] ?? "").toString().trim() || null,
+          linkedinProfile: (row["LinkedIn 2"] ?? "").toString().trim() || null,
+        };
+
+          await upsertContact(poc1, true);
+          await upsertContact(poc2, false);
+
         } catch (error: any) {
-          console.error('Row processing error:', error);
           results.errors.push({
-            row: i + 1,
-            error: error.message || 'Failed to process row',
+            row: rowNum,
+            error: error?.message || "Failed to process row",
           });
         }
       }
+      console.log("[csv-upload] using csv-parse ✅");
 
-      res.json({
+      return res.json({
         success: true,
         message: `Upload completed: ${results.successfulCompanies} companies, ${results.successfulLeads} leads, ${results.successfulContacts} contacts`,
-        results: { ...results, createdCompanyIds },
+        results,
       });
     } catch (error: any) {
-      console.error('Error processing CSV upload:', error);
-      res
-        .status(500)
-        .json({ message: error.message || 'Failed to process CSV upload' });
+      console.error("Error processing CSV upload:", error);
+      return res.status(500).json({ message: error.message || "Failed to process CSV upload" });
     }
   }
 );
@@ -966,7 +3425,8 @@ app.post(
                 ? '30'
                 : leadData.stage === 'qualified'
                 ? '15'
-                : '5'
+                : '5',
+            createdBy: currentUser.id,  // ⭐ REQUIRED    
           });
           createdLeads.push(lead);
         }
@@ -979,6 +3439,7 @@ app.post(
               createdLeads[i].id,
               organizationId,
               leadStages[i].assignedTo!,
+              undefined,
               assignedBy,
               'Initial assignment during data population'
             );
@@ -1075,7 +3536,7 @@ app.post(
     });
 
     // PATCH route for partial company updates (same as PUT for this API)
-    app.patch('/api/companies/:id', authMiddleware, requireRole(['partner', 'admin']), validateIntParam('id'), validateResourceExists('company'), async (req: any, res) => {
+    app.patch('/api/companies/:id', authMiddleware, requireRole(['partner', 'admin','analyst']), validateIntParam('id'), validateResourceExists('company'), async (req: any, res) => {
       try {
         const currentUser = req.verifiedUser;
         if (!currentUser || !currentUser.organizationId) {
@@ -1351,7 +3812,8 @@ app.post(
           organizationId: currentUser.organizationId,
           ownerAnalystId,
           assignedTo,
-          stage: 'universe' // All leads start in universe stage
+          stage: 'universe', // All leads start in universe stage
+          createdBy: currentUser.id,   // ⭐ REQUIRED
         });
         
         // Log activity
@@ -1377,8 +3839,8 @@ app.post(
     app.get('/api/leads/all', authMiddleware, async (req: any, res) => {
       try {
         console.log("api hit /api/leads/all", req.body);
-        const userId = req.verifiedUser;
-        const user = user.id;
+        const user = req.verifiedUser;
+        const userId = user.id;
         if (!user || !user.organizationId) {
           return res.status(404).json({ message: 'User not found or missing organization' });
         }
@@ -1386,19 +3848,534 @@ app.post(
         const userRole = user.role || 'analyst';
         
         if (userRole === 'analyst') {
-          // Analysts only see their assigned leads
+          // Analysts only see leads assigned to them
           const leads = await storage.getLeadsByAssignee(userId, user.organizationId);
-          res.json(leads);
-        } else {
-          // Partners and admins can see all leads
-          const leads = await storage.getAllLeads(user.organizationId);
-          res.json(leads);
+          return res.json(leads);
         }
+
+        if (userRole === 'partner') {
+          // Partners only see leads assigned to them (partner assignment)
+          const leads = await storage.getLeadsByPartner(userId, user.organizationId);
+          return res.json(leads);
+        }
+
+        // Admin sees all
+        const leads = await storage.getAllLeads(user.organizationId);
+        return res.json(leads);
       } catch (error) {
         console.error('Error fetching all leads:', error);
         res.status(500).json({ message: 'Failed to fetch all leads' });
       }
     });
+
+    // ------------------------------
+    // Contact Management: Active Leads only
+    // Active stages = qualified, outreach, pitching, mandates
+    // ------------------------------
+    const ACTIVE_LEAD_STAGES = new Set<string>([
+      "qualified",
+      "outreach",
+      "pitching",
+      "mandates",
+    ]);
+
+    const getLeadStage = (l: any) =>
+      String(l?.stage ?? l?.lead?.stage ?? "").toLowerCase();
+
+    const filterActiveLeads = (leads: any[]) =>
+      (leads || []).filter((l: any) => ACTIVE_LEAD_STAGES.has(getLeadStage(l)));
+
+
+
+    app.get('/api/contact-management/metrics', authMiddleware, async (req: any, res) => {
+      try {
+        const user = req.verifiedUser;
+        const userId = user?.id;
+
+        if (!user || !user.organizationId) {
+          return res.status(404).json({ message: 'User not found or missing organization' });
+        }
+
+        const userRole = user.role || 'analyst';
+
+        let leadsList: any[] = [];
+        if (userRole === 'analyst') {
+          leadsList = await storage.getLeadsByAssignee(userId, user.organizationId);
+        } else if (userRole === 'partner') {
+          leadsList = await storage.getLeadsByPartner(userId, user.organizationId);
+        } else {
+          leadsList = await storage.getAllLeads(user.organizationId);
+        }
+
+        // ✅ ONLY Active leads for Contact Management
+        leadsList = filterActiveLeads(leadsList);
+
+        const companyIds = (leadsList || [])
+          .map((l: any) => l.companyId)
+          .filter((x: any) => typeof x === "number");
+
+        const metrics = await storage.getContactManagementMetrics(user.organizationId, companyIds);
+
+        // ------------------------------
+        // NEW: Field Coverage Table (7 rows)
+        // Denominator = total leads visible to user
+        // ------------------------------
+        const totalLeads = (leadsList || []).length;
+
+        const isFilled = (v: any) => {
+          if (v === null || v === undefined) return false;
+          if (typeof v === "string") return v.trim().length > 0;
+          return true; // numbers etc.
+        };
+
+        const pct = (n: number) => (totalLeads > 0 ? Number(((n / totalLeads) * 100).toFixed(2)) : 0);
+
+        // NOTE: these depend on your actual returned lead shape from storage (works with your current code style)
+        const analystCount = (leadsList || []).filter((l: any) => isFilled(l.assignedTo)).length;
+        const partnerCount = (leadsList || []).filter((l: any) => isFilled(l.assignedPartnerId)).length;
+        const sectorCount = (leadsList || []).filter((l: any) => isFilled(l.company?.sector)).length;
+        const leadSourceCount = (leadsList || []).filter((l: any) => isFilled(l.leadSource)).length;
+        const websiteCount = (leadsList || []).filter((l: any) => isFilled(l.company?.website)).length;
+
+        // Financial info = 1 only if all three are filled
+        const financialInfoCount = (leadsList || []).filter((l: any) => {
+          const c = l.company || {};
+          return isFilled(c.revenueInrCr) && isFilled(c.ebitdaInrCr) && isFilled(c.patInrCr);
+        }).length;
+
+        const fieldCoverage = {
+          totalLeads,
+          rows: [
+            { source: "company", totalNumber: totalLeads, percentage: pct(totalLeads) },
+            { source: "analyst", totalNumber: analystCount, percentage: pct(analystCount) },
+            { source: "partner", totalNumber: partnerCount, percentage: pct(partnerCount) },
+            { source: "sector", totalNumber: sectorCount, percentage: pct(sectorCount) },
+            { source: "leadsource", totalNumber: leadSourceCount, percentage: pct(leadSourceCount) },
+            { source: "website", totalNumber: websiteCount, percentage: pct(websiteCount) },
+            { source: "financial info", totalNumber: financialInfoCount, percentage: pct(financialInfoCount) },
+          ],
+        };
+
+        // Return old metrics + new table (backward compatible)
+        return res.json({
+          ...metrics,
+          fieldCoverage,
+        });
+
+      } catch (error) {
+        console.error('Error building contact management metrics:', error);
+        return res.status(500).json({ message: 'Failed to fetch contact management metrics' });
+      }
+    });
+ 
+   app.get('/api/contact-management/poc1', authMiddleware, async (req: any, res) => {
+    try {
+      const user = req.verifiedUser;
+      const userId = user?.id;
+
+      if (!user || !user.organizationId) {
+        return res.status(404).json({ message: 'User not found or missing organization' });
+      }
+
+      const userRole = user.role || 'analyst';
+
+      let leadsList: any[] = [];
+      if (userRole === 'analyst') {
+        leadsList = await storage.getLeadsByAssignee(userId, user.organizationId);
+      } else if (userRole === 'partner') {
+        leadsList = await storage.getLeadsByPartner(userId, user.organizationId);
+      } else {
+        leadsList = await storage.getAllLeads(user.organizationId);
+      }
+
+      // ✅ ONLY Active leads for POC1
+      leadsList = filterActiveLeads(leadsList);
+
+      const allUsers = await storage.getUsers(user.organizationId);
+
+      const userMap = new Map<string, any>();
+      for (const u of allUsers) userMap.set(u.id, u);
+
+      const getUserLabel = (u: any) => {
+        if (!u) return "";
+        const full = `${u.firstName || ""} ${u.lastName || ""}`.trim();
+        return full || u.email || u.id || "";
+      };
+
+
+      // IMPORTANT: in your storage methods, `contact` is already the PRIMARY contact (isPrimary = true)
+      const items = (leadsList || []).map((l: any) => {
+        const analystUser = l.assignedToUser || null;
+        const partnerUser = l.assignedPartnerId ? userMap.get(l.assignedPartnerId) : null;
+
+        return {
+          leadId: l.id ?? l.lead?.id,
+          companyId: l.companyId ?? l.lead?.companyId ?? l.company?.id,
+          companyName: l.company?.name ?? l.companyName ?? "—",
+
+          // ✅ for filtering
+          analystId: l.assignedTo ?? null,
+          analystName: getUserLabel(analystUser),
+          partnerId: l.assignedPartnerId ?? null,
+          partnerName: getUserLabel(partnerUser),
+
+          contactId: l.contact?.id ?? null,
+          name: l.contact?.name ?? "",
+          designation: l.contact?.designation ?? "",
+          phone: l.contact?.phone ?? "",
+          linkedinProfile: l.contact?.linkedinProfile ?? "",
+          email: l.contact?.email ?? "",
+        };
+      });
+
+
+      return res.json({ items });
+    } catch (error) {
+      console.error('Error building POC1 table:', error);
+      return res.status(500).json({ message: 'Failed to fetch POC1 table' });
+    }
+  });
+
+
+  app.get('/api/contact-management/poc2', authMiddleware, async (req: any, res) => {
+    try {
+      const user = req.verifiedUser;
+      const userId = user?.id;
+
+      if (!user || !user.organizationId) {
+        return res.status(404).json({ message: 'User not found or missing organization' });
+      }
+
+      const userRole = user.role || 'analyst';
+
+      let leadsList: any[] = [];
+      if (userRole === 'analyst') {
+        leadsList = await storage.getLeadsByAssignee(userId, user.organizationId);
+      } else if (userRole === 'partner') {
+        leadsList = await storage.getLeadsByPartner(userId, user.organizationId);
+      } else {
+        leadsList = await storage.getAllLeads(user.organizationId);
+      }
+
+      // ✅ ONLY Active leads for POC2
+      leadsList = filterActiveLeads(leadsList);
+
+    const allUsers = await storage.getUsers(user.organizationId);
+
+    const userMap = new Map<string, any>();
+    for (const u of allUsers) userMap.set(u.id, u);
+
+    const getUserLabel = (u: any) => {
+      if (!u) return "";
+      const full = `${u.firstName || ""} ${u.lastName || ""}`.trim();
+      return full || u.email || u.id || "";
+    };
+
+      
+      const companyIds = (leadsList || [])
+        .map((l: any) => l.companyId)
+        .filter((x: any) => typeof x === "number");
+
+      const contactRows = companyIds.length
+        ? await db
+            .select({
+              companyId: contacts.companyId,
+              id: contacts.id,
+              name: contacts.name,
+              designation: contacts.designation,
+              phone: contacts.phone,
+              email: contacts.email,
+              linkedinProfile: contacts.linkedinProfile,
+            })
+            .from(contacts)
+            .where(
+              and(
+                eq(contacts.organizationId, user.organizationId),
+                inArray(contacts.companyId, companyIds),
+                eq(contacts.isPrimary, false)
+              )
+            )
+            .orderBy(asc(contacts.createdAt), asc(contacts.id))
+        : [];
+
+      const byCompany = new Map<number, any[]>();
+      for (const c of contactRows) {
+        const cid = c.companyId as unknown as number;
+        if (!byCompany.has(cid)) byCompany.set(cid, []);
+        byCompany.get(cid)!.push(c);
+      }
+
+      const items = (leadsList || []).map((l: any) => {
+        const list = byCompany.get(l.companyId) || [];
+        const poc2 = list[0] || null; // first non-primary
+        const analystUser = l.assignedToUser || null;
+        const partnerUser = l.assignedPartnerId ? userMap.get(l.assignedPartnerId) : null;
+        return {
+          leadId: l.id,
+          companyId: l.companyId,
+          companyName: l.company?.name ?? "—",
+            // ✅ for filtering
+          analystId: l.assignedTo ?? null,
+          analystName: getUserLabel(analystUser),
+          partnerId: l.assignedPartnerId ?? null,
+          partnerName: getUserLabel(partnerUser),
+          contactId: poc2?.id ?? null,
+          name: poc2?.name ?? "",
+          designation: poc2?.designation ?? "",
+          phone: poc2?.phone ?? "",
+          linkedinProfile: poc2?.linkedinProfile ?? "",
+          email: poc2?.email ?? "",
+        };
+      });
+
+      return res.json({ items });
+    } catch (error) {
+      console.error('Error building POC2 table:', error);
+      return res.status(500).json({ message: 'Failed to fetch POC2 table' });
+    }
+  });
+
+  app.get('/api/contact-management/poc3', authMiddleware, async (req: any, res) => {
+    try {
+      const user = req.verifiedUser;
+      const userId = user?.id;
+
+      if (!user || !user.organizationId) {
+        return res.status(404).json({ message: 'User not found or missing organization' });
+      }
+
+      const userRole = user.role || 'analyst';
+
+      let leadsList: any[] = [];
+      if (userRole === 'analyst') {
+        leadsList = await storage.getLeadsByAssignee(userId, user.organizationId);
+      } else if (userRole === 'partner') {
+        leadsList = await storage.getLeadsByPartner(userId, user.organizationId);
+      } else {
+        leadsList = await storage.getAllLeads(user.organizationId);
+      }
+
+      // ✅ ONLY Active leads for POC3
+      leadsList = filterActiveLeads(leadsList);
+
+      const allUsers = await storage.getUsers(user.organizationId);
+
+      const userMap = new Map<string, any>();
+      for (const u of allUsers) userMap.set(u.id, u);
+
+      const getUserLabel = (u: any) => {
+        if (!u) return "";
+        const full = `${u.firstName || ""} ${u.lastName || ""}`.trim();
+        return full || u.email || u.id || "";
+      };
+
+      const companyIds = (leadsList || [])
+        .map((l: any) => l.companyId)
+        .filter((x: any) => typeof x === "number");
+
+      const contactRows = companyIds.length
+        ? await db
+            .select({
+              companyId: contacts.companyId,
+              id: contacts.id,
+              name: contacts.name,
+              designation: contacts.designation,
+              phone: contacts.phone,
+              email: contacts.email,
+              linkedinProfile: contacts.linkedinProfile,
+            })
+            .from(contacts)
+            .where(
+              and(
+                eq(contacts.organizationId, user.organizationId),
+                inArray(contacts.companyId, companyIds),
+                eq(contacts.isPrimary, false)
+              )
+            )
+            .orderBy(asc(contacts.createdAt), asc(contacts.id))
+        : [];
+
+      const byCompany = new Map<number, any[]>();
+      for (const c of contactRows) {
+        const cid = c.companyId as unknown as number;
+        if (!byCompany.has(cid)) byCompany.set(cid, []);
+        byCompany.get(cid)!.push(c);
+      }
+
+      const items = (leadsList || []).map((l: any) => {
+        const list = byCompany.get(l.companyId) || [];
+        const poc3 = list[1] || null; // second non-primary
+        const analystUser = l.assignedToUser || null;
+        const partnerUser = l.assignedPartnerId ? userMap.get(l.assignedPartnerId) : null;
+        return {
+          leadId: l.id,
+          companyId: l.companyId,
+          companyName: l.company?.name ?? "—",
+            // ✅ for filtering
+          analystId: l.assignedTo ?? null,
+          analystName: getUserLabel(analystUser),
+          partnerId: l.assignedPartnerId ?? null,
+          partnerName: getUserLabel(partnerUser),
+          contactId: poc3?.id ?? null,
+          name: poc3?.name ?? "",
+          designation: poc3?.designation ?? "",
+          phone: poc3?.phone ?? "",
+          linkedinProfile: poc3?.linkedinProfile ?? "",
+          email: poc3?.email ?? "",
+        };
+      });
+
+      return res.json({ items });
+    } catch (error) {
+      console.error('Error building POC3 table:', error);
+      return res.status(500).json({ message: 'Failed to fetch POC3 table' });
+    }
+  });
+
+
+
+    // ---------------------------------------------------------
+  // Contact Management: Other Fields (Active Leads only)
+  // ---------------------------------------------------------
+  app.get('/api/contact-management/other-fields', authMiddleware, async (req: any, res) => {
+    try {
+      const user = req.verifiedUser;
+      const userId = user?.id;
+
+      if (!user || !user.organizationId) {
+        return res.status(404).json({ message: 'User not found or missing organization' });
+      }
+
+      const userRole = user.role || 'analyst';
+
+      let leadsList: any[] = [];
+      if (userRole === 'analyst') {
+        leadsList = await storage.getLeadsByAssignee(userId, user.organizationId);
+      } else if (userRole === 'partner') {
+        leadsList = await storage.getLeadsByPartner(userId, user.organizationId);
+      } else {
+        leadsList = await storage.getAllLeads(user.organizationId);
+      }
+
+      // ✅ Active leads only (same logic as POC tabs)
+      leadsList = filterActiveLeads(leadsList);
+
+      const toNum = (v: any) => {
+        if (v === null || v === undefined || v === "") return null;
+        const n = typeof v === "number" ? v : Number(v);
+        return Number.isFinite(n) ? n : null;
+      };
+
+      const items = (leadsList || []).map((l: any) => {
+        const company = l.company ?? l.company;
+        return {
+          leadId: l.id ?? l.lead?.id,
+          companyId: l.companyId ?? l.lead?.companyId ?? company?.id,
+          companyName: company?.name ?? l.companyName ?? "—",
+
+          sector: company?.sector ?? "",
+          leadSource: l.leadSource ?? l.lead?.leadSource ?? "",
+          website: company?.website ?? "",
+
+          revenueInrCr: toNum(company?.revenueInrCr),
+          ebitdaInrCr: toNum(company?.ebitdaInrCr),
+          patInrCr: toNum(company?.patInrCr),
+        };
+      });
+
+      return res.json({ items });
+    } catch (error) {
+      console.error('Error building Other Fields table:', error);
+      return res.status(500).json({ message: 'Failed to fetch Other Fields table' });
+    }
+  });
+
+  app.patch('/api/contact-management/other-fields/:leadId', authMiddleware, async (req: any, res) => {
+    try {
+      const user = req.verifiedUser;
+      const userId = user?.id;
+
+      if (!user || !user.organizationId) {
+        return res.status(404).json({ message: 'User not found or missing organization' });
+      }
+
+      const leadId = Number(req.params.leadId);
+      if (!Number.isFinite(leadId)) {
+        return res.status(400).json({ message: 'Invalid leadId' });
+      }
+
+      // ✅ Permission check by visibility (same logic as POC tabs)
+      const userRole = user.role || 'analyst';
+
+      let leadsList: any[] = [];
+      if (userRole === 'analyst') {
+        leadsList = await storage.getLeadsByAssignee(userId, user.organizationId);
+      } else if (userRole === 'partner') {
+        leadsList = await storage.getLeadsByPartner(userId, user.organizationId);
+      } else {
+        leadsList = await storage.getAllLeads(user.organizationId);
+      }
+
+      leadsList = filterActiveLeads(leadsList);
+
+      const target = (leadsList || []).find((l: any) => (l.id ?? l.lead?.id) === leadId);
+      if (!target) {
+        return res.status(404).json({ message: 'Lead not found (or not visible / not active)' });
+      }
+
+      const company = target.company ?? target.company;
+      const companyId = target.companyId ?? target.lead?.companyId ?? company?.id;
+
+      if (!companyId || !Number.isFinite(Number(companyId))) {
+        return res.status(400).json({ message: 'Missing companyId for this lead' });
+      }
+
+      const body = req.body || {};
+
+      const coerceText = (v: any) => (typeof v === "string" ? v.trim() : v);
+      const coerceNum = (v: any) => {
+        if (v === null || v === undefined || v === "") return undefined;
+        const n = typeof v === "number" ? v : Number(v);
+        return Number.isFinite(n) ? n : undefined;
+      };
+
+      const companyUpdates: any = {};
+      if ("sector" in body) companyUpdates.sector = coerceText(body.sector) ?? "";
+      if ("website" in body) companyUpdates.website = coerceText(body.website) ?? "";
+
+      if ("revenueInrCr" in body) {
+        const n = coerceNum(body.revenueInrCr);
+        if (n !== undefined) companyUpdates.revenueInrCr = n;
+      }
+      if ("ebitdaInrCr" in body) {
+        const n = coerceNum(body.ebitdaInrCr);
+        if (n !== undefined) companyUpdates.ebitdaInrCr = n;
+      }
+      if ("patInrCr" in body) {
+        const n = coerceNum(body.patInrCr);
+        if (n !== undefined) companyUpdates.patInrCr = n;
+      }
+
+      const hasCompanyUpdates = Object.keys(companyUpdates).length > 0;
+
+      if (hasCompanyUpdates) {
+        await storage.updateCompany(Number(companyId), user.organizationId, companyUpdates);
+      }
+
+      if ("leadSource" in body) {
+        const leadSource = coerceText(body.leadSource) ?? "";
+        await storage.updateLead(leadId, user.organizationId, { leadSource });
+      }
+
+      return res.json({ ok: true });
+    } catch (error) {
+      console.error('Error saving Other Fields row:', error);
+      return res.status(500).json({ message: 'Failed to save Other Fields row' });
+    }
+  });
+
+
+
 
     app.get('/api/leads/my', authMiddleware, async (req: any, res) => {
       try {
@@ -1423,31 +4400,46 @@ app.post(
 
     app.get('/api/leads/stage/:stage', authMiddleware, validateStage, async (req: any, res) => {
       try {
-        // Verify role from storage and enforce access control
         const user = req.verifiedUser;
-        const userId = user.id;
+        const userId = user?.id;
 
         if (!user || !user.organizationId) {
           return res.status(404).json({ message: 'User not found or missing organization' });
         }
-        
+
         const userRole = user.role || 'analyst';
-        
+        const stage = req.params.stage;
+
+        // ✅ Universe = ALL leads (same behavior as your Universe tab)
+        const isUniverse = stage === 'universe';
+
         if (userRole === 'analyst') {
-          // Analysts only see their assigned leads in this stage
           const allAssignedLeads = await storage.getLeadsByAssignee(userId, user.organizationId);
-          const filteredLeads = allAssignedLeads.filter(lead => lead.stage === req.params.stage);
-          res.json(filteredLeads);
-        } else {
-          // Only partners and admins can see all leads in a stage
-          const leads = await storage.getLeadsByStage(req.params.stage, user.organizationId);
-          res.json(leads);
+          const filtered = isUniverse ? allAssignedLeads : allAssignedLeads.filter(l => l.stage === stage);
+          return res.json(filtered);
         }
+
+        if (userRole === 'partner') {
+          const partnerLeads = await storage.getLeadsByPartner(userId, user.organizationId);
+          const filtered = isUniverse ? partnerLeads : partnerLeads.filter(l => l.stage === stage);
+          return res.json(filtered);
+        }
+
+        // admin
+        if (isUniverse) {
+          const all = await storage.getAllLeads(user.organizationId);
+          return res.json(all);
+        }
+
+        const leads = await storage.getLeadsByStage(stage, user.organizationId);
+        return res.json(leads);
+
       } catch (error) {
         console.error('Error fetching leads by stage:', error);
-        res.status(500).json({ message: 'Failed to fetch leads' });
+        return res.status(500).json({ message: 'Failed to fetch leads' });
       }
     });
+
 
     // GET leads assigned to current intern user (for intern dashboard)
     app.get('/api/leads/assigned', authMiddleware, requireRole(['intern']), async (req: any, res) => {
@@ -1496,7 +4488,16 @@ app.post(
     app.get('/api/leads/:id', authMiddleware, validateIntParam('id'), validateResourceExists('lead'), async (req: any, res) => {
       try {
         // Lead already validated by middleware
-        res.json(req.resource);
+        const lead = req.resource;
+
+        if (req.verifiedUser.role === 'partner' && lead.assignedPartnerId !== req.verifiedUser.id) {
+          return res.status(403).json({ message: 'Access denied' });
+        }
+
+        // ✅ Call storage.getLead to ensure we get the populated Company data
+        const fullLead = await storage.getLead(lead.id, req.verifiedUser.organizationId);
+
+        res.json(fullLead);
       } catch (error) {
         console.error('Error fetching lead:', error);
         res.status(500).json({ message: 'Failed to fetch lead' });
@@ -1561,6 +4562,114 @@ app.post(
       }
     });
 
+   // PATCH: Update only leadSource for a lead
+    app.patch('/api/leads/:id/source', authMiddleware, validateResourceExists('lead'), async (req: any, res) => {
+      try {
+        const currentUser = req.verifiedUser;
+        if (!currentUser || !currentUser.organizationId) {
+          return res.status(401).json({ message: 'User organization not found' });
+        }
+
+        const { leadSource } = req.body;
+
+        // must be provided (can be null to clear)
+        if (leadSource === undefined) {
+          return res.status(400).json({ message: 'leadSource field is required' });
+        }
+
+        const validSources = ['inbound', 'outbound', 'otherchannelpartner', 'idfc', 'maheen', 'altmount'];
+        if (leadSource !== null && !validSources.includes(leadSource)) {
+          return res.status(400).json({ message: 'Invalid leadSource value' });
+        }
+
+        const updated = await storage.updateLead(
+          parseInt(req.params.id),
+          currentUser.organizationId,
+          { leadSource }
+        );
+
+        res.json(updated);
+      } catch (error) {
+        console.error('Error updating leadSource:', error);
+        res.status(400).json({
+          message: 'Failed to update leadSource',
+          error: error instanceof Error ? error.message : 'Unknown error'
+        });
+      }
+    });
+
+
+    
+    // PATCH: Update only chatgptLink for a lead
+    app.patch('/api/leads/:id/chatgpt-link', authMiddleware, validateResourceExists('lead'), async (req: any, res) => {
+      try {
+        const currentUser = req.verifiedUser;
+        if (!currentUser || !currentUser.organizationId) {
+          return res.status(401).json({ message: 'User organization not found' });
+        }
+
+        const { chatgptLink } = req.body;
+
+        const updated = await storage.updateLead(
+          parseInt(req.params.id),
+          currentUser.organizationId,
+          { chatgptLink: chatgptLink || null } as any
+        );
+
+        res.json(updated);
+      } catch (error) {
+        console.error('Error updating chatgptLink:', error);
+        res.status(400).json({
+          message: 'Failed to update chatgptLink',
+          error: error instanceof Error ? error.message : 'Unknown error'
+        });
+      }
+    });
+
+
+// PATCH: Update only leadTemperature for a lead (null = Not set)
+app.patch('/api/leads/:id/temperature', authMiddleware, validateResourceExists('lead'), async (req: any, res) => {
+  try {
+    const currentUser = req.verifiedUser;
+    if (!currentUser || !currentUser.organizationId) {
+      return res.status(401).json({ message: 'User organization not found' });
+    }
+
+    const { leadTemperature } = req.body;
+
+    if (leadTemperature === undefined) {
+      return res.status(400).json({ message: 'leadTemperature field is required' });
+    }
+
+    // Allow: "hot", "warm", "not_reached", null.
+    // Also tolerate UI sending "not_set" or "" -> null.
+    // Also normalize "Not reached" -> "not_reached"
+    const normalized =
+      leadTemperature === null || leadTemperature === "" || leadTemperature === "not_set"
+        ? null
+        : String(leadTemperature).toLowerCase().trim().replace(/\s+/g, "_");
+
+    const validTemps = ["hot", "warm", "not_reached"];
+    if (normalized !== null && !validTemps.includes(normalized)) {
+      return res.status(400).json({ message: "Invalid leadTemperature value" });
+    }
+
+    const updated = await storage.updateLead(
+      parseInt(req.params.id),
+      currentUser.organizationId,
+      { leadTemperature: normalized } as any
+    );
+
+    res.json(updated);
+  } catch (error) {
+    console.error('Error updating leadTemperature:', error);
+    res.status(400).json({
+      message: 'Failed to update leadTemperature',
+      error: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
 
     // PATCH route for manual stage transitions: qualified → outreach, outreach → pitching, pitching → mandates
     app.patch('/api/leads/:id/stage', authMiddleware, validateResourceExists('lead'), async (req: any, res) => {
@@ -1570,13 +4679,13 @@ app.post(
           return res.status(401).json({ message: 'User organization not found' });
         }
         
-        const { stage, defaultPocId, backupPocId } = req.body;
+        const { stage, defaultPocId, backupPocId, note } = req.body;
         if (!stage) {
           return res.status(400).json({ message: 'Stage is required' });
         }
         
         // Validate stage is a valid value
-        const validStages = ['universe', 'qualified', 'outreach', 'pitching', 'mandates', 'won', 'lost', 'rejected'];
+        const validStages = ['universe', 'qualified', 'outreach', 'pitching', 'mandates', 'completed_mandate', 'won', 'lost', 'hold', 'dropped', 'rejected'];
         if (!validStages.includes(stage)) {
           return res.status(400).json({ message: 'Invalid stage value' });
         }
@@ -1592,83 +4701,90 @@ app.post(
         const isQualifiedToOutreach = currentLead.stage === 'qualified' && stage === 'outreach';
         const isOutreachToPitching = currentLead.stage === 'outreach' && stage === 'pitching';
         const isPitchingToMandates = currentLead.stage === 'pitching' && stage === 'mandates';
-        
-        if (!isQualifiedToOutreach && !isOutreachToPitching && !isPitchingToMandates) {
-          return res.status(400).json({ 
-            message: 'This endpoint only supports manual transitions: Qualified→Outreach, Outreach→Pitching, or Pitching→Mandates',
+        const isMandatesToCompletedMandate = currentLead.stage === 'mandates' && stage === 'completed_mandate';
+ 
+        const isMoveToHold = stage === 'hold';
+        const isMoveToDropped = stage === 'dropped';
+
+        // IMPORTANT: From Hold/Dropped pages, your UI only does direct PATCH moves to Universe/Qualified.
+        // (Outreach/Pitching/Mandates are handled via their own flows.)
+        const isFromHoldOrDroppedToSimple =
+          (currentLead.stage === 'hold' || currentLead.stage === 'dropped') &&
+          (stage === 'universe' || stage === 'qualified');
+
+        if (
+          !isQualifiedToOutreach &&
+          !isOutreachToPitching &&
+          !isPitchingToMandates &&
+          !isMandatesToCompletedMandate &&
+          !isMoveToHold &&
+          !isMoveToDropped &&
+          !isFromHoldOrDroppedToSimple
+        ) {
+          return res.status(400).json({
+            message:
+              'This endpoint only supports: Qualified→Outreach, Outreach→Pitching, Pitching→Mandates, Mandates→Completed Mandate, Move→Hold, Move→Dropped, or Hold/Dropped→(Universe/Qualified)',
             currentStage: currentLead.stage,
-            requestedStage: stage
+            requestedStage: stage,
           });
         }
+
         
         // For outreach → pitching transition, validate that a meeting intervention exists and POC is selected
         if (isOutreachToPitching) {
-          const interventions = await storage.getInterventions(leadId, currentUser.organizationId);
-          const hasMeeting = interventions.some((intervention: any) => intervention.type === 'meeting');
-          
-          if (!hasMeeting) {
-            return res.status(400).json({
-              message: 'Cannot move to Pitching stage: A meeting with POCs must be recorded first',
-              currentStage: currentLead.stage,
-              requestedStage: stage,
-              requiresMeeting: true
-            });
+          // Allow Outreach → Pitching even without meeting and even without POCs.
+          // But if POCs are provided, validate they belong to the same company + org.
+
+          // Validate default POC only if provided
+          if (defaultPocId) {
+            const defaultContact = await storage.getContact(defaultPocId, currentUser.organizationId);
+            if (!defaultContact) {
+              return res.status(404).json({ message: 'Default POC not found' });
+            }
+
+            if (defaultContact.companyId !== currentLead.companyId) {
+              return res.status(403).json({ message: 'Invalid POC: Contact must belong to the same company' });
+            }
           }
-          
-          // Validate default POC is provided
-          if (!defaultPocId) {
-            return res.status(400).json({
-              message: 'Cannot move to Pitching stage: Default POC must be selected',
-              currentStage: currentLead.stage,
-              requestedStage: stage,
-              requiresDefaultPoc: true
-            });
-          }
-          
-          // CRITICAL SECURITY: Validate that POCs belong to the same company and organization
-          const defaultContact = await storage.getContact(defaultPocId, currentUser.organizationId);
-          if (!defaultContact) {
-            return res.status(404).json({
-              message: 'Default POC not found'
-            });
-          }
-          
-          if (defaultContact.companyId !== currentLead.companyId) {
-            return res.status(403).json({
-              message: 'Invalid POC: Contact must belong to the same company'
-            });
-          }
-          
-          // Validate backup POC if provided
+
+          // Validate backup POC only if provided
           if (backupPocId) {
+            // backup requires default
+            if (!defaultPocId) {
+              return res.status(400).json({ message: 'Backup POC requires a Default POC' });
+            }
+
             // Ensure backup is different from default
             if (backupPocId === defaultPocId) {
-              return res.status(400).json({
-                message: 'Backup POC must be different from default POC'
-              });
+              return res.status(400).json({ message: 'Backup POC must be different from default POC' });
             }
-            
+
             const backupContact = await storage.getContact(backupPocId, currentUser.organizationId);
             if (!backupContact) {
-              return res.status(404).json({
-                message: 'Backup POC not found'
-              });
+              return res.status(404).json({ message: 'Backup POC not found' });
             }
-            
+
             if (backupContact.companyId !== currentLead.companyId) {
-              return res.status(403).json({
-                message: 'Invalid backup POC: Contact must belong to the same company'
-              });
+              return res.status(403).json({ message: 'Invalid backup POC: Contact must belong to the same company' });
             }
           }
         }
-        
-        // Build updates object with POC IDs if moving to pitching
+
+        if (isMandatesToCompletedMandate) {
+          if (!note || !String(note).trim()) {
+            return res.status(400).json({ message: 'Note is required to move to Completed Mandate' });
+          }
+        }
+
         const updates: any = { stage };
+
         if (isOutreachToPitching && defaultPocId) {
           updates.defaultPocId = defaultPocId;
-          // Allow explicit null to clear backupPocId
           updates.backupPocId = backupPocId || null;
+        }
+
+        if (isMandatesToCompletedMandate) {
+          updates.notes = String(note).trim();
         }
         
         const lead = await storage.updateLead(leadId, currentUser.organizationId, updates);
@@ -1686,6 +4802,17 @@ app.post(
           newValue: stage,
           description: `Lead manually moved from ${currentLead.stage} to ${stage}`
         });
+
+        // ✅ NEW: Find all EPN partners linked to this lead and auto-sync their stages
+        try {
+          const linkedEpns = await storage.getLinkedEpnsForLead(currentUser.organizationId, leadId);
+          for (const epn of linkedEpns) {
+            await storage.syncEpnPartnerStage(currentUser.organizationId, epn.id);
+          }
+        } catch (syncErr) {
+          console.error('Error syncing EPN partner stages:', syncErr);
+        }
+
         
         res.json(lead);
       } catch (error) {
@@ -1734,6 +4861,17 @@ app.post(
           newValue: 'rejected',
           description: `Lead rejected from ${currentLead.stage} stage. Reason: ${rejectionReason}`
         });
+
+        // ✅ NEW: Find all EPN partners linked to this lead and auto-sync their stages
+        try {
+          const linkedEpns = await storage.getLinkedEpnsForLead(currentUser.organizationId, leadId);
+          for (const epn of linkedEpns) {
+            await storage.syncEpnPartnerStage(currentUser.organizationId, epn.id);
+          }
+        } catch (syncErr) {
+          console.error('Error syncing EPN partner stages:', syncErr);
+        }
+        
         
         res.json(lead);
       } catch (error) {
@@ -1742,119 +4880,91 @@ app.post(
       }
     });
 
-    app.post('/api/leads/:id/assign', authMiddleware, requireRole(['partner', 'admin']), validateResourceExists('lead'), async (req: any, res) => {
-      try {
-        const { assignedTo, notes, challengeToken } = req.body;
-        const assignedBy = req.verifiedUser.id;
-        const leadId = parseInt(req.params.id);
-        
-        // Get the current lead to check if it's a reassignment
-        const currentLead = await storage.getLead(leadId, req.verifiedUser.organizationId);
-        if (!currentLead) {
-          return res.status(404).json({ message: 'Lead not found' });
+  app.post(
+  "/api/leads/:id/assign",
+  authMiddleware,
+  requireRole(["admin"]),
+  validateResourceExists("lead"),
+  async (req: any, res) => {
+    try {
+      const { assignedTo, assignedPartnerId, notes, challengeToken } = req.body;
+      const assignedBy = req.verifiedUser.id;
+      const leadId = parseInt(req.params.id, 10);
+      const organizationId = req.verifiedUser.organizationId;
+
+      const currentLead = await storage.getLead(leadId, organizationId);
+      if (!currentLead) return res.status(404).json({ message: "Lead not found" });
+
+      // ✅ PATCH semantics
+      const hasAssignedTo = Object.prototype.hasOwnProperty.call(req.body, "assignedTo");
+      const hasAssignedPartnerId = Object.prototype.hasOwnProperty.call(req.body, "assignedPartnerId");
+
+      // Reassignment only if changing an existing value
+      const analystChanged =
+        hasAssignedTo &&
+        !!currentLead.assignedTo &&
+        currentLead.assignedTo !== assignedTo;
+
+      const partnerChanged =
+        hasAssignedPartnerId &&
+        !!(currentLead as any).assignedPartnerId &&
+        (currentLead as any).assignedPartnerId !== assignedPartnerId;
+
+      const isReassignment = !!(analystChanged || partnerChanged);
+
+      if (isReassignment) {
+        if (!challengeToken) {
+          return res.status(400).json({ message: "Challenge token required for reassignments", isReassignment: true });
         }
-        
-        // Check if this is a reassignment (lead already has an assignedTo value)
-        const isReassignment = currentLead.assignedTo && currentLead.assignedTo !== assignedTo;
-        
-        // For reassignments, require a challenge token
-        if (isReassignment) {
-          if (!challengeToken) {
-            return res.status(400).json({ 
-              message: 'Challenge token required for reassignments',
-              isReassignment: true
-            });
-          }
-          
-          // Validate the challenge token using storage method
-          try {
-            const isValidToken = await storage.validateChallengeToken(
-              challengeToken,
-              req.verifiedUser.id,
-              req.verifiedUser.organizationId,
-              leadId,
-              'reassignment'
-            );
-            
-            if (!isValidToken) {
-              return res.status(400).json({ 
-                message: 'Invalid or expired challenge token',
-                isReassignment: true
-              });
-            }
-          } catch (tokenValidationError) {
-            console.error('Token validation error:', tokenValidationError);
-            return res.status(400).json({ 
-              message: 'Challenge token validation failed',
-              isReassignment: true
-            });
-          }
-          
-          console.log(`Reassignment authorized with challenge token for lead ${leadId}`);
+
+        const isValidToken = await storage.validateChallengeToken(
+          challengeToken,
+          req.verifiedUser.id,
+          organizationId,
+          leadId,
+          "reassignment"
+        );
+
+        if (!isValidToken) {
+          return res.status(400).json({ message: "Invalid or expired challenge token", isReassignment: true });
         }
-        
-        // Support unassigning by allowing null assignedTo
-        if (assignedTo !== null && assignedTo !== undefined) {
-          // Verify the user being assigned to exists
-          const assignedUser = await storage.getUser(assignedTo);
-          if (!assignedUser) {
-            return res.status(404).json({ message: 'Assigned user not found' });
-          }
-        }
-        
-        await storage.assignLead(leadId, req.verifiedUser.organizationId, assignedTo, assignedBy, notes);
-        
-        // Log the assignment activity
-        try {
-          const currentUser = req.verifiedUser || await storage.getUser(assignedBy);
-          const lead = await storage.getLead(parseInt(req.params.id), currentUser.organizationId);
-          if (lead && currentUser) {
-            const company = await storage.getCompany(lead.companyId, currentUser.organizationId);
-            if (company) {
-              const assignedUser = assignedTo ? await storage.getUser(assignedTo) : null;
-              const assignedToName = assignedUser 
-                ? `${assignedUser.firstName || ''} ${assignedUser.lastName || ''}`.trim() || assignedUser.email
-                : undefined;
-              
-              await ActivityLogService.logLeadAssigned(
-                currentUser.organizationId,
-                assignedBy,
-                lead.id,
-                lead.companyId,
-                company.name,
-                assignedTo || null,
-                assignedToName || undefined
-              );
-            }
-          }
-        } catch (logError) {
-          console.error('Error logging assignment activity:', logError);
-          // Don't fail the assignment if logging fails
-        }
-        
-        // Check if lead can auto-progress after assignment
-        try {
-          const currentUserForProgress = req.verifiedUser || await storage.getUser(assignedBy);
-          if (currentUserForProgress && currentUserForProgress.organizationId) {
-            const autoProgress = await stageProgressionService.autoProgressLead(parseInt(req.params.id), currentUserForProgress.organizationId);
-            res.json({ 
-              success: true, 
-              autoProgressed: autoProgress.progressed,
-              newStage: autoProgress.newStage 
-            });
-          } else {
-            res.json({ success: true, autoProgressed: false });
-          }
-        } catch (progressError) {
-          // Assignment succeeded but auto-progression failed - still return success
-          console.log('Auto-progression check failed:', progressError);
-          res.json({ success: true, autoProgressed: false });
-        }
-      } catch (error) {
-        console.error('Error assigning lead:', error);
-        res.status(400).json({ message: 'Failed to assign lead', error: error instanceof Error ? error.message : 'Unknown error' });
       }
-    });
+
+      // Validate analyst only if key present and not null
+      if (hasAssignedTo && assignedTo !== null) {
+        const analystUser = await storage.getUser(assignedTo);
+        if (!analystUser) return res.status(404).json({ message: "Analyst user not found" });
+        if (analystUser.role !== "analyst") return res.status(400).json({ message: "assignedTo must be an analyst user" });
+      }
+
+      // Validate partner only if key present and not null
+      if (hasAssignedPartnerId && assignedPartnerId !== null) {
+        const partnerUser = await storage.getUser(assignedPartnerId);
+        if (!partnerUser) return res.status(404).json({ message: "Partner user not found" });
+        if (partnerUser.role !== "partner") return res.status(400).json({ message: "assignedPartnerId must be a partner user" });
+      }
+
+      // undefined => keep; null => clear
+      const assignedToToSend = hasAssignedTo ? (assignedTo ?? null) : undefined;
+      const assignedPartnerToSend = hasAssignedPartnerId ? (assignedPartnerId ?? null) : undefined;
+
+      await storage.assignLead(
+        leadId,
+        organizationId,
+        assignedToToSend,
+        assignedPartnerToSend,
+        assignedBy,
+        notes
+      );
+
+      return res.json({ success: true });
+    } catch (error: any) {
+      console.error("Error assigning lead:", error);
+      return res.status(400).json({ message: "Failed to assign lead", error: error?.message || "Unknown error" });
+    }
+  }
+);
+
 
     // Assign multiple interns to a lead
     app.post('/api/leads/:id/assign-interns', authMiddleware, requireRole(['partner', 'admin']), validateResourceExists('lead'), async (req: any, res) => {
@@ -1909,53 +5019,135 @@ app.post(
     });
 
     // Bulk assign leads route
-    app.post('/api/leads/bulk-assign', authMiddleware, requireRole(['partner', 'admin']), async (req: any, res) => {
-      try {
-        const { leadIds, assignedTo } = req.body;
-        const assignedBy = req.verifiedUser.id;
-        const organizationId = req.verifiedUser.organizationId;
+    // Bulk assign leads route
+     app.post(
+      "/api/leads/bulk-assign",
+      authMiddleware,
+      requireRole(["partner", "admin"]),
+      async (req: any, res) => {
+        try {
+          const { leadIds, assignedTo } = req.body;
+          const assignedBy = req.verifiedUser.id;
+          const organizationId = req.verifiedUser.organizationId;
 
-        if (!leadIds || !Array.isArray(leadIds) || leadIds.length === 0) {
-          return res.status(400).json({ message: 'Lead IDs array is required' });
-        }
-
-        if (!assignedTo) {
-          return res.status(400).json({ message: 'Assigned user is required' });
-        }
-
-        // Verify the user being assigned to exists and belongs to the same organization
-        const assignedUser = await storage.getUser(assignedTo);
-        if (!assignedUser) {
-          return res.status(404).json({ message: 'Assigned user not found' });
-        }
-
-        if (assignedUser.organizationId !== organizationId) {
-          return res.status(403).json({ message: 'Cannot assign leads to users outside your organization' });
-        }
-
-        // Verify all leads exist and belong to the organization
-        for (const leadId of leadIds) {
-          const lead = await storage.getLead(leadId, organizationId);
-          if (!lead) {
-            return res.status(404).json({ message: `Lead ${leadId} not found` });
+          if (!leadIds || !Array.isArray(leadIds) || leadIds.length === 0) {
+            return res.status(400).json({ message: "Lead IDs array is required" });
           }
-        }
 
-        // Perform bulk assignment by calling assignLead for each lead
-        for (const leadId of leadIds) {
-          await storage.assignLead(leadId, organizationId, assignedTo, assignedBy, `Bulk assignment`);
-        }
+          if (!assignedTo) {
+            return res.status(400).json({ message: "Assigned user is required" });
+          }
+          // ✅ Normalize leadIds to numbers (front-end often sends strings)
+          const leadIdsNum = leadIds
+            .map((id: any) => Number(id))
+            .filter((n: number) => Number.isFinite(n));
 
-        res.json({ 
-          success: true, 
-          message: `Successfully assigned ${leadIds.length} leads to ${assignedUser.firstName} ${assignedUser.lastName}`,
-          assignedCount: leadIds.length 
-        });
-      } catch (error) {
-        console.error('Error bulk assigning leads:', error);
-        res.status(400).json({ message: 'Failed to bulk assign leads', error: error instanceof Error ? error.message : 'Unknown error' });
+          if (leadIdsNum.length !== leadIds.length) {
+            return res.status(400).json({ message: "Invalid leadIds: must be numbers" });
+          }
+
+          // Verify the user being assigned to exists and belongs to the same organization
+          const assignedUser = await storage.getUser(assignedTo);
+          if (!assignedUser) {
+            return res.status(404).json({ message: "Assigned user not found" });
+          }
+
+          if (Number(assignedUser.organizationId) !== Number(organizationId)) {
+            return res
+              .status(403)
+              .json({ message: "Cannot assign leads to users outside your organization" });
+          }
+
+          const isAnalystAssignee = assignedUser.role === "analyst";
+          const isPartnerAssignee = assignedUser.role === "partner";
+
+          if (!isAnalystAssignee && !isPartnerAssignee) {
+            return res.status(400).json({
+              message: "Failed to bulk assign leads",
+              error: "Assigned user must be an analyst or partner",
+            });
+          }
+
+
+          // Verify all leads exist and belong to the organization
+          for (const leadId of leadIdsNum) {
+            const lead = await storage.getLead(leadId, organizationId);
+            if (!lead) {
+              return res.status(404).json({ message: `Lead ${leadId} not found` });
+            }
+          }
+
+          // Perform bulk assignment + auto move Universe -> Qualified when assigned to analyst
+          let autoQualifiedCount = 0;
+
+          for (const leadId of leadIdsNum) {
+            if (isAnalystAssignee) {
+              // 1) Assign to analyst (assignedTo)
+              await storage.assignLead(
+                leadId,
+                organizationId,
+                assignedTo,
+                undefined,
+                assignedBy,
+                "Bulk assignment"
+              );
+
+              // 2) Trigger stage logic (only for analyst assignment)
+              try {
+                await stageProgressionService.autoProgressLead(leadId, organizationId);
+              } catch (e) {
+                console.error(`Auto-progression failed for lead ${leadId}:`, e);
+              }
+
+              // 3) SAFETY fallback: force Universe -> Qualified if assigned to analyst
+              const updatedLead = await storage.getLead(leadId, organizationId);
+              if (updatedLead && updatedLead.stage === "universe") {
+                await storage.updateLead(leadId, organizationId, { stage: "qualified" });
+              }
+
+              // Count qualified after everything
+              const finalLead = await storage.getLead(leadId, organizationId);
+              if (finalLead?.stage === "qualified") {
+                autoQualifiedCount++;
+              }
+            } else {
+              // ✅ Assign to partner (assignedPartnerId)
+              await storage.assignLead(
+                leadId,
+                organizationId,
+                undefined,        // DO NOT touch assignedTo
+                assignedTo,       // partner id goes here
+                assignedBy,
+                "Bulk assignment"
+              );
+
+              // ❌ No autoProgressLead / no Universe->Qualified move for partner assignment
+            }
+          }
+
+            // OPTIONAL (only if you want the same “normal flow” checks)
+            // try {
+            //   await stageProgressionService.autoProgressLead(leadId, organizationId);
+            // } catch (e) {
+            //   console.log(`Auto-progression failed for lead ${leadId}:`, e);
+            // }
+          
+
+          return res.json({
+            success: true,
+            message: `Successfully assigned ${leadIds.length} leads to ${assignedUser.firstName} ${assignedUser.lastName}`,
+            assignedCount: leadIds.length,
+            autoQualifiedCount,
+          });
+        } catch (error) {
+          console.error("Error bulk assigning leads:", error);
+          return res.status(400).json({
+            message: "Failed to bulk assign leads",
+            error: error instanceof Error ? error.message : "Unknown error",
+          });
+        }
       }
-    });
+    );
 
 
 
@@ -2147,6 +5339,7 @@ app.post(
               if (fromUser.role !== 'intern' || toUser.role !== 'intern') {
                 return res.status(400).json({ message: 'Both users must be interns' });
               }
+
 
               // Perform the reassign
               const updatedLead = await storage.reassignInternInLead(
@@ -2381,6 +5574,17 @@ app.post(
           return res.status(404).json({ message: 'Failed to update lead stage' });
         }
 
+
+        // ✅ NEW: Find all EPN partners linked to this lead and auto-sync their stages
+        try {
+          const linkedEpns = await storage.getLinkedEpnsForLead(currentUser.organizationId, parseInt(req.params.id));
+          for (const epn of linkedEpns) {
+            await storage.syncEpnPartnerStage(currentUser.organizationId, epn.id);
+          }
+        } catch (syncErr) {
+          console.error('Error syncing EPN partner stages:', syncErr);
+        }
+
         res.json({ success: true, lead: updatedLead });
       } catch (error) {
         console.error('Error progressing lead stage:', error);
@@ -2434,27 +5638,85 @@ app.post(
           organizationId: currentUser.organizationId
         });
         
-        const activity = await storage.createOutreachActivity(activityData);
+
         
         // If a follow-up date is provided, also create an intervention record for Scheduled Tasks
+        const activity = await storage.createOutreachActivity(activityData);
+
+        // If a follow-up date is provided, also create intervention records for Scheduled Tasks
         if (followUpDate) {
           try {
-            await storage.createIntervention({
-              leadId: req.body.leadId,
-              // type: mapActivityTypeToInterventionType(req.body.activityType),
-              type: req.body.activityType,
-              scheduledAt: followUpDate,
-              notes: req.body.notes || 'Scheduled outreach activity',
-              organizationId: currentUser.organizationId,
-              userId: currentUser.id
-            });
+            const orgId = currentUser.organizationId;
+            const userId = currentUser.id;
+            const leadId = req.body.leadId;
+            const baseNotes = req.body.notes || 'Scheduled outreach activity';
+
+            // Normalize anchor date to 09:30 AM local
+            const baseDate = new Date(followUpDate);
+            baseDate.setHours(9, 30, 0, 0);
+
+            // Helper to add days
+            const addDays = (date: Date, days: number) => {
+              const d = new Date(date);
+              d.setDate(d.getDate() + days);
+              return d;
+            };
+
+            // Email D0 triggers the entire D0/D1/D3/D7 cadence
+            if (req.body.activityType === 'email_d0_analyst') {
+              const reminders = [
+                // D0 Tasks (same day)
+                { offset: 0, type: 'linkedin_request_self' },
+                { offset: 0, type: 'linkedin_messages_self' },
+                { offset: 0, type: 'linkedin_request_dinesh' },
+                { offset: 0, type: 'linkedin_messages_dinesh' },
+                { offset: 0, type: 'linkedin_request_kvs' },
+                { offset: 0, type: 'linkedin_messages_kvs' },
+
+                // D1 Tasks (+1 day)
+                { offset: 1, type: 'whatsapp_kvs' },
+                { offset: 1, type: 'call_d1_dinesh' },
+
+                // D3 Tasks (+3 days)
+                { offset: 3, type: 'email_d3_analyst' },
+                { offset: 3, type: 'whatsapp_dinesh' },
+
+                // D7 Tasks (+7 days)
+                { offset: 7, type: 'channel_partner' },
+                { offset: 7, type: 'email_d7_kvs' },
+              ];
+
+              for (const r of reminders) {
+                await storage.createIntervention({
+                  leadId,
+                  type: r.type,
+                  scheduledAt: addDays(baseDate, r.offset),
+                  notes: baseNotes,
+                  organizationId: orgId,
+                  userId,
+                  status: 'pending',
+                });
+              }
+            } else {
+              // Default behaviour: single reminder for whatever activity was scheduled
+              await storage.createIntervention({
+                leadId,
+                type: req.body.activityType,
+                scheduledAt: baseDate,
+                notes: baseNotes,
+                organizationId: orgId,
+                userId,
+                status: 'pending',
+              });
+            }
           } catch (interventionError) {
             console.error('Error creating intervention for scheduled outreach:', interventionError);
             // Don't fail the request if intervention creation fails
           }
         }
-        
+
         res.json(activity);
+
       } catch (error) {
         console.error('Error creating outreach activity:', error);
         res.status(400).json({ message: 'Failed to create outreach activity', error: error instanceof Error ? error.message : 'Unknown error' });
@@ -2499,6 +5761,516 @@ app.post(
         });
       }
     });
+
+
+        app.get(
+      "/api/lead-poc-outreach/lead/:leadId",
+      authMiddleware,
+      validateIntParam("leadId"),
+      async (req: any, res) => {
+        try {
+          const currentUser =
+            req.verifiedUser || (await storage.getUser(req.user?.claims?.sub));
+
+          if (!currentUser || !currentUser.organizationId) {
+            return res.status(401).json({ message: "User organization not found" });
+          }
+
+          const leadId = parseInt(req.params.leadId, 10);
+          const lead = await storage.getLead(leadId, currentUser.organizationId);
+
+          if (!lead) {
+            return res.status(404).json({ message: "Lead not found" });
+          }
+
+          const companyContacts = await storage.getContactsByCompany(
+            lead.companyId,
+            currentUser.organizationId
+          );
+
+          const availableContacts = [...companyContacts]
+            .sort((a, b) => {
+              const primaryDiff =
+                Number(Boolean(b.isPrimary)) - Number(Boolean(a.isPrimary));
+              if (primaryDiff !== 0) return primaryDiff;
+              return a.id - b.id;
+            })
+            .slice(0, 3);
+
+          const statusRows = await storage.getLeadPocOutreachStatuses(
+            leadId,
+            currentUser.organizationId
+          );
+
+          const pocs = availableContacts.map((contact, index) => ({
+            slot: index + 1,
+            contact,
+              channels: {
+                linkedin:
+                  statusRows.find(
+                    (row) =>
+                      row.contactId === contact.id && row.channel === "linkedin"
+                  ) || null,
+                email:
+                  statusRows.find(
+                    (row) => row.contactId === contact.id && row.channel === "email"
+                  ) || null,
+                whatsapp:
+                  statusRows.find(
+                    (row) =>
+                      row.contactId === contact.id && row.channel === "whatsapp"
+                  ) || null,
+                call:
+                  statusRows.find(
+                    (row) =>
+                      row.contactId === contact.id && row.channel === "call"
+                  ) || null,
+                channel_partner:
+                  statusRows.find(
+                    (row) =>
+                      row.contactId === contact.id && row.channel === "channel_partner"
+                  ) || null,
+              },
+          }));
+
+          return res.json({
+            lead: {
+              id: lead.id,
+              stage: lead.stage,
+              companyId: lead.companyId,
+              companyName: lead.company.name,
+            },
+            pocs,
+            statusOptions: LEAD_POC_OUTREACH_STATUS_OPTIONS,
+          });
+        } catch (error) {
+          console.error("Error fetching lead POC outreach status:", error);
+          return res
+            .status(500)
+            .json({ message: "Failed to fetch lead POC outreach status" });
+        }
+      }
+    );
+
+    app.put(
+      "/api/lead-poc-outreach/lead/:leadId",
+      authMiddleware,
+      validateIntParam("leadId"),
+      async (req: any, res) => {
+        try {
+          const currentUser =
+            req.verifiedUser || (await storage.getUser(req.user?.claims?.sub));
+
+          if (!currentUser || !currentUser.organizationId) {
+            return res.status(401).json({ message: "User organization not found" });
+          }
+
+          const leadId = parseInt(req.params.leadId, 10);
+          const lead = await storage.getLead(leadId, currentUser.organizationId);
+
+          if (!lead) {
+            return res.status(404).json({ message: "Lead not found" });
+          }
+
+const bodySchema = z.object({
+  contactId: z.coerce.number(),
+  channel: z.enum(["linkedin", "email", "whatsapp", "call", "channel_partner"]),
+  status: z.string().trim().min(1).optional(),
+  remarks: z.string().optional().nullable(),
+  nextActionText: z.string().optional().nullable(),
+  nextActionAt: z.coerce.date().optional().nullable(),
+});
+
+          const parsed = bodySchema.parse(req.body);
+
+          if (parsed.status && !isValidLeadPocOutreachStatus(parsed.channel, parsed.status)) {
+            return res.status(400).json({
+              message: `Invalid status '${parsed.status}' for channel '${parsed.channel}'`,
+            });
+          }
+
+if (
+  parsed.status === undefined &&
+  parsed.remarks === undefined &&
+  parsed.nextActionText === undefined &&
+  parsed.nextActionAt === undefined
+) {
+  return res.status(400).json({
+    message: "At least one of status, remarks, nextActionText, or nextActionAt must be provided",
+  });
+}
+
+          const contact = await storage.getContact(
+            parsed.contactId,
+            currentUser.organizationId
+          );
+
+          if (!contact || contact.companyId !== lead.companyId) {
+            return res.status(404).json({
+              message: "Contact not found for this lead/company",
+            });
+          }
+
+          const existing = await storage.getLeadPocOutreachStatusRecord(
+            leadId,
+            parsed.contactId,
+            parsed.channel,
+            currentUser.organizationId
+          );
+
+          const now = new Date();
+
+          let initiatedAt = existing?.initiatedAt ?? null;
+          if (parsed.status === "initiated" && !initiatedAt) {
+            initiatedAt = now;
+          }
+
+          const shouldTriggerEmailCadence =
+            parsed.channel === "email" &&
+            parsed.status === "initiated" &&
+            !existing?.cadenceTriggeredAt;
+
+const savedRecord = await storage.upsertLeadPocOutreachStatus({
+  organizationId: currentUser.organizationId,
+  leadId,
+  contactId: parsed.contactId,
+  channel: parsed.channel,
+  status: parsed.status ?? existing?.status ?? null,
+  initiatedAt,
+  lastUpdatedAt: now,
+  remarks:
+    parsed.remarks !== undefined ? parsed.remarks : existing?.remarks,
+  nextActionText:
+    parsed.nextActionText !== undefined
+      ? parsed.nextActionText
+      : existing?.nextActionText ?? null,
+  nextActionAt:
+    parsed.nextActionAt !== undefined
+      ? parsed.nextActionAt
+      : existing?.nextActionAt ?? null,
+  cadenceTriggeredAt: shouldTriggerEmailCadence
+    ? now
+    : existing?.cadenceTriggeredAt ?? null,
+  createdBy: existing?.createdBy ?? currentUser.id,
+});
+
+          if (shouldTriggerEmailCadence) {
+            try {
+              await seedEmailInitiatedCadence({
+                leadId,
+                organizationId: currentUser.organizationId,
+                userId: currentUser.id,
+                contactName: contact.name,
+                anchorDate: now,
+                remarks:
+                  parsed.remarks !== undefined
+                    ? parsed.remarks
+                    : existing?.remarks ?? null,
+              });
+            } catch (cadenceError) {
+              console.error(
+                "Error creating automatic email initiated cadence:",
+                cadenceError
+              );
+            }
+          }
+
+          await storage.createActivityLog({
+            organizationId: currentUser.organizationId,
+            userId: currentUser.id,
+            action: "lead_poc_outreach_status_updated",
+            entityType: "lead_poc_outreach_status",
+            entityId: savedRecord.id,
+            leadId,
+            companyId: lead.companyId,
+            description: `Updated ${parsed.channel} outreach for ${contact.name || "POC"}`,
+newValue: JSON.stringify({
+  contactId: parsed.contactId,
+  channel: parsed.channel,
+  status: savedRecord.status,
+  remarks: savedRecord.remarks,
+  nextActionText: savedRecord.nextActionText,
+  nextActionAt: savedRecord.nextActionAt,
+}),
+          });
+
+          return res.json(savedRecord);
+        } catch (error) {
+          console.error("Error updating lead POC outreach status:", error);
+          return res.status(400).json({
+            message: "Failed to update lead POC outreach status",
+            error: error instanceof Error ? error.message : "Unknown error",
+          });
+        }
+      }
+    );
+
+
+        // ✅ Fetch investor manage outreach matrix for one lead-linked investor
+    app.get(
+      "/api/investor-poc-outreach/lead/:leadId/investor/:investorId",
+      authMiddleware,
+      requireRole(["admin", "partner", "analyst"]),
+      async (req: any, res) => {
+        try {
+          const currentUser =
+            req.verifiedUser || (await storage.getUser(req.user?.claims?.sub));
+
+          if (!currentUser || !currentUser.organizationId) {
+            return res.status(401).json({ message: "User organization not found" });
+          }
+
+          const leadId = Number(req.params.leadId);
+          const investorId = Number(req.params.investorId);
+
+          if (!Number.isFinite(leadId) || leadId <= 0) {
+            return res.status(400).json({ message: "Invalid leadId" });
+          }
+
+          if (!Number.isFinite(investorId) || investorId <= 0) {
+            return res.status(400).json({ message: "Invalid investorId" });
+          }
+
+          const lead = await storage.getLead(leadId, currentUser.organizationId);
+          if (!lead) {
+            return res.status(404).json({ message: "Lead not found" });
+          }
+
+          const linkedInvestors = await storage.getInvestorsByLead(
+            currentUser.organizationId,
+            leadId
+          );
+
+          const linkedInvestor = linkedInvestors.find((item: any) => item.id === investorId);
+
+          if (!linkedInvestor) {
+            return res.status(404).json({
+              message: "Investor is not linked to this lead",
+            });
+          }
+
+          const statusRows = await storage.getInvestorPocOutreachStatuses(
+            leadId,
+            investorId,
+            currentUser.organizationId
+          );
+
+          const contacts = (linkedInvestor.contacts || []).map((contact: any, index: number) => ({
+            slot: index + 1,
+            contact,
+            channels: {
+              linkedin:
+                statusRows.find(
+                  (row) =>
+                    row.contactId === contact.id && row.channel === "linkedin"
+                ) || null,
+              email:
+                statusRows.find(
+                  (row) => row.contactId === contact.id && row.channel === "email"
+                ) || null,
+              whatsapp:
+                statusRows.find(
+                  (row) =>
+                    row.contactId === contact.id && row.channel === "whatsapp"
+                ) || null,
+              call:
+                statusRows.find(
+                  (row) =>
+                    row.contactId === contact.id && row.channel === "call"
+                ) || null,
+              channel_partner:
+                statusRows.find(
+                  (row) =>
+                    row.contactId === contact.id &&
+                    row.channel === "channel_partner"
+                ) || null,
+            },
+          }));
+
+          return res.json({
+            lead: {
+              id: lead.id,
+              stage: lead.stage,
+              companyId: lead.companyId,
+              companyName: lead.company.name,
+            },
+            investor: {
+              id: linkedInvestor.id,
+              name: linkedInvestor.name,
+              currentLinkedStatus: linkedInvestor.status || "yet_to_contact",
+            },
+            pocs: contacts,
+            statusOptions: INVESTOR_POC_OUTREACH_STATUS_OPTIONS,
+          });
+        } catch (error) {
+          console.error("Error fetching investor POC outreach status:", error);
+          return res
+            .status(500)
+            .json({ message: "Failed to fetch investor POC outreach status" });
+        }
+      }
+    );
+
+    // ✅ Update investor manage outreach + auto-sync linked investor status
+    app.put(
+      "/api/investor-poc-outreach/lead/:leadId/investor/:investorId",
+      authMiddleware,
+      requireRole(["admin", "partner", "analyst"]),
+      async (req: any, res) => {
+        try {
+          const currentUser =
+            req.verifiedUser || (await storage.getUser(req.user?.claims?.sub));
+
+          if (!currentUser || !currentUser.organizationId) {
+            return res.status(401).json({ message: "User organization not found" });
+          }
+
+          const leadId = Number(req.params.leadId);
+          const investorId = Number(req.params.investorId);
+
+          if (!Number.isFinite(leadId) || leadId <= 0) {
+            return res.status(400).json({ message: "Invalid leadId" });
+          }
+
+          if (!Number.isFinite(investorId) || investorId <= 0) {
+            return res.status(400).json({ message: "Invalid investorId" });
+          }
+
+          const lead = await storage.getLead(leadId, currentUser.organizationId);
+          if (!lead) {
+            return res.status(404).json({ message: "Lead not found" });
+          }
+
+          const linkedInvestors = await storage.getInvestorsByLead(
+            currentUser.organizationId,
+            leadId
+          );
+
+          const linkedInvestor = linkedInvestors.find((item: any) => item.id === investorId);
+
+          if (!linkedInvestor) {
+            return res.status(404).json({
+              message: "Investor is not linked to this lead",
+            });
+          }
+
+          const bodySchema = z.object({
+            contactId: z.coerce.number(),
+            channel: z.enum(["linkedin", "email", "whatsapp", "call", "channel_partner"]),
+            status: z.string().trim().min(1).optional(),
+            remarks: z.string().optional().nullable(),
+          });
+
+          const parsed = bodySchema.parse(req.body);
+
+          if (
+            parsed.status &&
+            !isValidInvestorPocOutreachStatus(parsed.channel, parsed.status)
+          ) {
+            return res.status(400).json({
+              message: `Invalid status '${parsed.status}' for channel '${parsed.channel}'`,
+            });
+          }
+
+          if (parsed.status === undefined && parsed.remarks === undefined) {
+            return res.status(400).json({
+              message: "At least one of status or remarks must be provided",
+            });
+          }
+
+          const validContact = (linkedInvestor.contacts || []).find(
+            (contact: any) => Number(contact.id) === parsed.contactId
+          );
+
+          if (!validContact) {
+            return res.status(404).json({
+              message: "Investor contact not found for this linked investor",
+            });
+          }
+
+          const existing = await storage.getInvestorPocOutreachStatusRecord(
+            leadId,
+            investorId,
+            parsed.contactId,
+            parsed.channel,
+            currentUser.organizationId
+          );
+
+          const now = new Date();
+
+          let initiatedAt = existing?.initiatedAt ?? null;
+          if (parsed.status === "initiated" && !initiatedAt) {
+            initiatedAt = now;
+          }
+
+          const savedRecord = await storage.upsertInvestorPocOutreachStatus({
+            organizationId: currentUser.organizationId,
+            leadId,
+            investorId,
+            contactId: parsed.contactId,
+            channel: parsed.channel,
+            status: parsed.status ?? existing?.status ?? null,
+            initiatedAt,
+            lastUpdatedAt: now,
+            remarks:
+              parsed.remarks !== undefined ? parsed.remarks : existing?.remarks,
+            cadenceTriggeredAt: existing?.cadenceTriggeredAt ?? null,
+            createdBy: existing?.createdBy ?? currentUser.id,
+          });
+
+            const allRows = await storage.getInvestorPocOutreachStatuses(
+              leadId,
+              investorId,
+              currentUser.organizationId
+            );
+
+            const expectedRowCount =
+              (Array.isArray(linkedInvestor.contacts) ? linkedInvestor.contacts.length : 0) * 5;
+
+            const nextLinkedStatus = deriveLinkedInvestorStatusFromOutreachRows(
+              allRows,
+              expectedRowCount
+            );
+
+          await storage.updateInvestorLeadLinkStatus(
+            currentUser.organizationId,
+            investorId,
+            leadId,
+            nextLinkedStatus
+          );
+
+          await storage.createActivityLog({
+            organizationId: currentUser.organizationId,
+            userId: currentUser.id,
+            action: "investor_poc_outreach_status_updated",
+            entityType: "investor_poc_outreach_status",
+            entityId: savedRecord.id,
+            leadId,
+            companyId: lead.companyId,
+            description: `Updated ${parsed.channel} outreach for ${validContact.name || "Investor POC"} (${linkedInvestor.name})`,
+            newValue: JSON.stringify({
+              investorId,
+              contactId: parsed.contactId,
+              channel: parsed.channel,
+              status: savedRecord.status,
+              remarks: savedRecord.remarks,
+              linkedInvestorStatus: nextLinkedStatus,
+            }),
+          });
+
+          return res.json({
+            ...savedRecord,
+            linkedInvestorStatus: nextLinkedStatus,
+          });
+        } catch (error) {
+          console.error("Error updating investor POC outreach status:", error);
+          return res.status(400).json({
+            message: "Failed to update investor POC outreach status",
+            error: error instanceof Error ? error.message : "Unknown error",
+          });
+        }
+      }
+    );
 
     
 
@@ -2572,7 +6344,8 @@ app.post(
           type: z.enum(["linkedin_message", "call", "whatsapp", "email", "meeting", "document"]),
           scheduledAt: z.string(), // Comes as string from datetime-local input
           notes: z.string().min(1, "Notes are required"),
-          documentName: z.string().optional() // For document type: PDM, MTS, LOE, Contract
+          documentName: z.string().optional(), // For document type: PDM, MTS, LOE, Contract
+          meetingMode: z.enum(["online", "inperson"]).optional(),
         });
         
         const validatedData = frontendSchema.parse(req.body);
@@ -2583,6 +6356,7 @@ app.post(
           scheduledAt: new Date(validatedData.scheduledAt), // Convert string to Date
           notes: validatedData.notes,
           documentName: validatedData.documentName,
+          meetingMode: validatedData.meetingMode, // add this
           organizationId: currentUser.organizationId,
           userId: currentUser.id
         });
@@ -2646,7 +6420,13 @@ app.post(
           return res.status(401).json({ message: 'User organization not found' });
         }
         
-        const updates = interventionFormSchema.partial().parse(req.body);
+        const updates = interventionFormSchema
+          .extend({
+            status: z.enum(["pending", "completed"]).optional(),
+          })
+          .partial()
+          .parse(req.body);
+
         const intervention = await storage.updateIntervention(parseInt(req.params.id), currentUser.organizationId, updates);
         
         if (!intervention) {
@@ -2785,7 +6565,7 @@ app.post(
     });
 
     // Comprehensive audit logs route for admin/partner audit page
-    app.get('/api/activity-logs', authMiddleware, requireRole(['admin', 'partner']), async (req: any, res) => {
+    app.get('/api/activity-logs', authMiddleware, requireRole(['admin', 'partner', 'analyst']), async (req: any, res) => {
       try {
         const currentUser = req.verifiedUser || await storage.getUser(req.user?.claims?.sub);
         console.log('>>> Current user:', currentUser?.id, currentUser?.organizationId);
@@ -2793,18 +6573,19 @@ app.post(
         if (!currentUser || !currentUser.organizationId) {
           return res.status(401).json({ message: 'User organization not found' });
         }
-        
+        const endDate = req.query.endDate ? new Date(String(req.query.endDate)) : undefined;
+        if (endDate) endDate.setHours(23, 59, 59, 999);
         // Parse filters from query parameters
         const filters = {
-          search: req.query.search as string,
-          userId: req.query.user ? parseInt(req.query.user) : undefined,
-          companyId: req.query.company ? parseInt(req.query.company) : undefined,
-          action: req.query.action as string,
-          startDate: req.query.startDate ? new Date(req.query.startDate) : undefined,
-          endDate: req.query.endDate ? new Date(req.query.endDate) : undefined,
-          page: req.query.page ? parseInt(req.query.page) : 1,
-          limit: req.query.limit ? parseInt(req.query.limit) : 50
-        };
+        search: req.query.search as string,
+        userId: req.query.user ? String(req.query.user) : undefined,
+        companyId: req.query.company ? parseInt(String(req.query.company)) : undefined,
+        action: req.query.action as string,
+        startDate: req.query.startDate ? new Date(String(req.query.startDate)) : undefined,
+        endDate,
+        page: req.query.page ? parseInt(String(req.query.page)) : 1,
+        limit: req.query.limit ? parseInt(String(req.query.limit)) : 50
+      };
         
         const result = await storage.getActivityLogsForAudit(currentUser.organizationId, filters);
         res.json(result);
@@ -2906,6 +6687,7 @@ app.post(
           pipelineValue: null,
           probability: '0',
           notes: null,
+          createdBy: currentUser.id,   // ⭐ REQUIRED
           // createdBy: formData.createdBy
         });
 
@@ -3303,6 +7085,215 @@ app.post(
         res.status(500).json({ message: 'Failed to get email status' });
       }
     });
+
+
+        // 🧹 TEMP: Public route to wipe news cache (Auth removed for easy browser access)
+    app.get('/api/debug/clear-news', async (req: any, res) => {
+      try {
+        // Delete ALL news items to force a re-fetch for everyone
+        await db.delete(newsFeed);
+        res.json({ message: "✅ Cache cleared! Now refresh your dashboard to see fresh news." });
+      } catch (error) {
+        console.error("Clear cache error:", error);
+        res.status(500).json({ message: "Failed to clear cache" });
+      }
+    });
+
+
+        // ✅ Configure Multer to save to disk (Required for Pitching Files)
+// Ensure the uploads folder exists
+if (!fs.existsSync('uploads')) {
+  fs.mkdirSync('uploads');
+}
+
+const diskStorage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    cb(null, 'uploads/')
+  },
+  filename: function (req, file, cb) {
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9)
+    cb(null, uniqueSuffix + '-' + file.originalname)
+  }
+});
+
+const pitchingUpload = multer({ storage: diskStorage });
+
+
+    // --- PITCHING TRACKER ROUTES ---
+
+    // 1. Get Details
+    app.get("/api/leads/:id/pitching", async (req, res) => {
+      const leadId = Number(req.params.id);
+      if (isNaN(leadId)) return res.status(400).json({ message: "Invalid lead ID" });
+
+      try {
+        const details = await storage.getPitchingDetails(leadId);
+        // Return empty object if none exists yet
+        res.json(details || {});
+      } catch (error) {
+        res.status(500).json({ message: "Failed to fetch pitching details" });
+      }
+    });
+
+// 2. Update Data (Text/Dates/Booleans)
+// 2. Update Data (Text/Dates/Booleans)
+   // 2. Update Data (Text/Dates/Booleans)
+    app.post("/api/leads/:id/pitching", async (req, res) => {
+      const leadId = Number(req.params.id);
+      
+      try {
+        console.log("Received pitching update for Lead:", leadId, req.body); 
+
+        // Prepare data: Convert date strings to Date objects if they exist
+        const data = { ...req.body };
+        if (data.meeting1Date) data.meeting1Date = new Date(data.meeting1Date);
+        if (data.meeting2Date) data.meeting2Date = new Date(data.meeting2Date);
+
+        // 1. Save the Pitching Details
+        const updated = await storage.upsertPitchingDetails(leadId, data);
+
+        // 2. Fetch User & Lead Data for Logging
+        const currentUser = (req as any).verifiedUser || (req.user?.claims?.sub ? await storage.getUser(req.user.claims.sub) : undefined);
+        
+        if (currentUser) {
+          // ✅ FIX: Fetch the lead to get the correct companyId
+          const lead = await storage.getLead(leadId, currentUser.organizationId);
+          const companyId = lead?.companyId || undefined;
+
+          await storage.createActivityLog({
+            organizationId: currentUser.organizationId,
+            userId: currentUser.id,
+            leadId: leadId,
+            companyId: companyId, // ✅ FIX: Pass the valid Company ID
+            action: 'pitching_updated',
+            entityType: 'lead',
+            entityId: leadId,
+            description: 'Updated pitching details (Milestones/Meetings)',
+          });
+        }
+
+        res.json(updated);
+        
+      } catch (error) {
+        console.error("CRITICAL ERROR saving pitching details:", error);
+        res.status(500).json({ 
+          message: "Failed to save pitching details", 
+          error: error instanceof Error ? error.message : String(error) 
+        });
+      }
+    });
+
+    // 3. Upload Files (Solution Note or PDM)
+    // Note: Assuming 'upload' is defined as: const upload = multer({ dest: "uploads/" });
+// 3. Upload Files (Solution Note or PDM)
+ // 3. Upload Files (Solution Note or PDM)
+    // ✅ Use pitchingUpload (disk storage) instead of upload (memory storage)
+    app.post("/api/leads/:id/pitching/upload", pitchingUpload.single("file"), async (req, res) => {
+      const leadId = Number(req.params.id);
+      const fileType = req.body.fileType; 
+      
+      if (!req.file || !fileType) {
+        return res.status(400).json({ message: "File or fileType missing" });
+      }
+
+      try {
+        // ✅ Validation: Ensure path exists
+        if (!req.file.path) {
+           throw new Error("Multer failed to generate file path");
+        }
+
+        const updateData: any = {};
+        let readableName = "File";
+
+        if (fileType === "solutionNote") {
+          updateData.solutionNotePath = req.file.path;
+          updateData.solutionNoteName = req.file.originalname;
+          readableName = "Solution Note";
+        } else if (fileType === "pdm") {
+          updateData.pdmPath = req.file.path;
+          updateData.pdmName = req.file.originalname;
+          readableName = "PDM";
+        }
+
+        const updated = await storage.upsertPitchingDetails(leadId, updateData);
+
+        // Log Activity
+        // ✅ Cast req to 'any' for both verifiedUser and user properties
+        const currentUser = (req as any).verifiedUser || ((req as any).user?.claims?.sub ? await storage.getUser((req as any).user.claims.sub) : undefined);
+        if (currentUser) {
+           const lead = await storage.getLead(leadId, currentUser.organizationId);
+           const companyId = lead?.companyId || undefined;
+           
+           await storage.createActivityLog({
+            organizationId: currentUser.organizationId,
+            userId: currentUser.id,
+            leadId: leadId,
+            companyId: companyId,
+            action: 'pitching_file_uploaded',
+            entityType: 'lead',
+            entityId: leadId,
+            description: `Uploaded ${readableName}: ${req.file.originalname}`,
+          });
+        }
+
+        res.json(updated);
+      } catch (error) {
+        console.error("Upload error:", error);
+        res.status(500).json({ message: "Failed to upload file" });
+      }
+    });
+
+    // 4. Download Files
+ // 4. Download Files
+// 4. Download Files
+    app.get("/api/leads/:id/pitching/download/:fileType", async (req, res) => {
+      const leadId = Number(req.params.id);
+      const { fileType } = req.params;
+
+      try {
+        const details = await storage.getPitchingDetails(leadId);
+        if (!details) return res.status(404).send("Details not found");
+
+        let dbPath: string | null = null;
+        let fileName: string = "download.pdf"; // Provide a default string value
+
+        if (fileType === "solutionNote") {
+          dbPath = details.solutionNotePath;
+          fileName = details.solutionNoteName || "Solution_Note.pdf";
+        } else if (fileType === "pdm") {
+          dbPath = details.pdmPath;
+          fileName = details.pdmName || "PDM.pdf";
+        }
+
+        // Check if we actually have a path to a file
+        if (!dbPath) {
+          return res.status(404).send("No file record found for this type");
+        }
+
+        // Resolve the absolute path
+        const absolutePath = path.isAbsolute(dbPath) 
+          ? dbPath 
+          : path.join(process.cwd(), dbPath);
+
+        console.log(`[Download] Attempting to serve: ${absolutePath}`);
+
+        if (!fs.existsSync(absolutePath)) {
+          console.error(`[Download Error] File NOT found at: ${absolutePath}`);
+          return res.status(404).send("File not found on server");
+        }
+
+        // ✅ FIX: Use a type guard or fallback to satisfy TypeScript
+        // This ensures the second argument is strictly a string.
+        res.download(absolutePath, fileName || "file.pdf");
+
+      } catch (error) {
+        console.error("Download route error:", error);
+        res.status(500).send("Download failed");
+      }
+    });
+
+
+
 
     // More routes can be added here
 

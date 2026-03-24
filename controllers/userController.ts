@@ -71,5 +71,15 @@ export const userController = {
       console.error('Error transferring leads:', error);
       res.status(500).json({ message: 'Failed to transfer leads' });
     }
+  },
+
+  transferOwnership: async (req: Request, res: Response) => {
+    try {
+      const result = await userService.transferOwnership(req.body.fromUserId, req.body.toUserId, req);
+      res.json(result);
+    } catch (error) {
+      console.error('Error transferring ownership:', error);
+      res.status(500).json({ message: 'Failed to transfer ownership' });
+    }
   }
 };

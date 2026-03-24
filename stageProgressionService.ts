@@ -1,5 +1,5 @@
-import type { Lead, Contact, OutreachActivity } from "@shared/schema";
-import type { IStorage } from "./storage";
+import type { Lead, Contact, OutreachActivity } from "@shared/schema.js";
+import type { IStorage } from "./storage.js";
 
 export interface StageProgression {
   currentStage: string;
@@ -19,35 +19,81 @@ export interface StageValidationResult {
 export class StageProgressionService {
   constructor(private storage: IStorage) {}
 
-  private validStages = ['universe', 'qualified', 'outreach', 'pitching', 'mandates', 'won', 'lost', 'rejected'];
+  private validStages = ['universe', 'qualified', 'outreach', 'pitching', 'mandates', 'completed_mandate', 'won', 'lost', 'rejected', 'hold', 'dropped'];
+
   
   private stageProgression = {
     'universe': ['qualified'],
     'qualified': ['outreach', 'rejected'],
     'outreach': ['pitching', 'rejected'],
     'pitching': ['mandates', 'lost', 'rejected'],
-    'mandates': ['won', 'lost', 'rejected'],
-    'won': [], // Terminal state
-    'lost': [], // Terminal state  
-    'rejected': [] // Terminal state
+    'mandates': ['completed_mandate', 'won', 'lost', 'rejected'],
+    'completed_mandate': ['won', 'lost', 'rejected'],
+    'won': [],
+    'lost': [],
+    'rejected': []
   };
 
   /**
    * Get all valid next stages for a given current stage
    */
-  getValidNextStages(currentStage: string): string[] {
-    return this.stageProgression[currentStage as keyof typeof this.stageProgression] || [];
-  }
+getValidNextStages(currentStage: string): string[] {
+  // Terminal + Hold: no "auto" next stages
+  if (['won', 'lost', 'rejected', 'hold', 'dropped'].includes(currentStage)) return [];
+
+  const base = this.stageProgression[currentStage as keyof typeof this.stageProgression] || [];
+  // From any non-terminal stage you can go to Hold or Rejected
+  return Array.from(new Set([...base, 'hold', 'dropped','rejected']));
+}
+
 
   /**
    * Check if a stage transition is valid
    */
-  isValidTransition(fromStage: string, toStage: string): boolean {
-    if (fromStage === toStage) return true; // Same stage is always valid
-    
-    const validNextStages = this.getValidNextStages(fromStage);
-    return validNextStages.includes(toStage);
+isValidTransition(fromStage: string, toStage: string): boolean {
+  if (fromStage === toStage) return true;
+
+  // ❌ Universe is intake-only: never allow moving back INTO universe
+  if (toStage === "universe") return false;
+
+  // ✅ Won/Lost are terminal: cannot move out
+  if (["won", "lost"].includes(fromStage)) return false;
+
+  // ✅ Universe lead can be moved to any stage (except universe)
+  if (fromStage === "universe") {
+    return ["qualified", "outreach", "pitching", "mandates", "completed_mandate", "hold", "dropped", "rejected"].includes(toStage);
   }
+
+  // ✅ Always allow moving INTO hold/dropped (from any non-terminal)
+  if (toStage === "hold" || toStage === "dropped") return true;
+
+  // ✅ Hold/Dropped can move back to any non-terminal stage (except universe)
+  if (fromStage === "hold" || fromStage === "dropped") {
+    return !["won", "lost"].includes(toStage);
+  }
+
+  // ✅ Rejected can move back to any non-terminal stage (except universe)
+  if (fromStage === "rejected") {
+    return !["won", "lost"].includes(toStage);
+  }
+
+  // ✅ Allow backwards/forwards moves across the main pipeline stages
+  const pipelineStages = ["qualified", "outreach", "pitching", "mandates", "completed_mandate"];
+  if (pipelineStages.includes(fromStage) && pipelineStages.includes(toStage)) return true;
+
+  // ✅ Allow reject from anywhere (note: your /stage endpoint blocks rejected; reject uses /reject)
+  if (toStage === "rejected") return true;
+
+  // ✅ Keep existing business outcomes logic
+  if (toStage === "won") return fromStage === "mandates";
+  if (toStage === "lost") return fromStage === "pitching" || fromStage === "mandates";
+
+  // fallback to old forward-progression logic (safe)
+  const validNextStages = this.getValidNextStages(fromStage);
+  return validNextStages.includes(toStage);
+}
+
+
 
   /**
    * Validate if lead meets requirements for a specific stage
@@ -96,51 +142,57 @@ export class StageProgressionService {
         }
         break;
 
-      case 'pitching':
-        // Requires outreach stage requirements PLUS at least one outreach activity
+      case 'pitching': {
+        // Pitching now requires only outreach-stage base requirements (no mandatory meeting/outreach activity).
         const outreachValidation = await this.validateStageRequirements(lead, 'outreach', contact, outreachActivities);
+
         if (!outreachValidation.isValid) {
           errors.push(...outreachValidation.errors);
           missingFields.push(...outreachValidation.missingFields);
         }
 
-        if (!outreachActivities || outreachActivities.length === 0) {
-          errors.push('At least one outreach activity is required before pitching stage');
-          missingFields.push('outreachActivities');
-        } else {
-          // Check if there's at least one completed outreach
-          const hasCompletedOutreach = outreachActivities.some(activity => 
-            activity.status === 'completed'
-          );
-          if (!hasCompletedOutreach) {
-            errors.push('At least one completed outreach activity is required before pitching');
-            missingFields.push('completedOutreach');
-          }
-        }
         break;
+      }
+
 
       case 'mandates':
-        // Requires pitching stage requirements PLUS Letter of Engagement document
-        const pitchingValidation = await this.validateStageRequirements(lead, 'pitching', contact, outreachActivities);
+        const pitchingValidation = await this.validateStageRequirements(
+          lead,
+          'pitching',
+          contact,
+          outreachActivities
+        );
+
         if (!pitchingValidation.isValid) {
           errors.push(...pitchingValidation.errors);
           missingFields.push(...pitchingValidation.missingFields);
         }
 
-        // Check for Letter of Engagement document
-        const interventions = await this.storage.getInterventions(lead.id, lead.organizationId);
-        const hasLetterOfEngagement = interventions.some(
-          (intervention: any) => intervention.type === 'document' && intervention.documentName === 'Letter of Engagement'
+        break;
+
+      case 'completed_mandate':
+        const mandatesValidationForCompleted = await this.validateStageRequirements(
+          lead,
+          'mandates',
+          contact,
+          outreachActivities
         );
-        if (!hasLetterOfEngagement) {
-          errors.push('Letter of Engagement document is required for Mandates stage');
-          missingFields.push('Letter of Engagement');
+
+        if (!mandatesValidationForCompleted.isValid) {
+          errors.push(...mandatesValidationForCompleted.errors);
+          missingFields.push(...mandatesValidationForCompleted.missingFields);
         }
+
+        if (!lead.notes || lead.notes.trim() === '') {
+          errors.push('Completion note is required');
+          missingFields.push('notes');
+        }
+
         break;
 
       case 'won':
         // Check if coming from mandates stage - if so, requires Contract document
-        if (lead.stage === 'mandates') {
+        if (lead.stage === 'mandates' || lead.stage === 'completed_mandate') {
           const mandatesValidation = await this.validateStageRequirements(lead, 'mandates', contact, outreachActivities);
           if (!mandatesValidation.isValid) {
             errors.push(...mandatesValidation.errors);
@@ -149,8 +201,8 @@ export class StageProgressionService {
 
           // Check for Contract document
           const interventionsForWon = await this.storage.getInterventions(lead.id, lead.organizationId);
-          const hasContract = interventionsForWon.some(
-            (intervention: any) => intervention.type === 'document' && intervention.documentName === 'Contract'
+          const hasContract = interventionsForWon.some((i: any) =>
+            i.type === "document" && normalizeDocName(i.documentName) === "contract"
           );
           if (!hasContract) {
             errors.push('Contract document is required to move from Mandates to Won');
@@ -173,7 +225,7 @@ export class StageProgressionService {
 
       case 'lost':
         // Lost can come from either pitching or mandates
-        if (lead.stage === 'mandates') {
+        if (lead.stage === 'mandates' || lead.stage === 'completed_mandate') {
           const mandatesValidationForLost = await this.validateStageRequirements(lead, 'mandates', contact, outreachActivities);
           if (!mandatesValidationForLost.isValid) {
             errors.push(...mandatesValidationForLost.errors);
@@ -191,6 +243,13 @@ export class StageProgressionService {
           errors.push('Deal outcome notes are required when closing a lead');
           missingFields.push('notes');
         }
+        break;
+      case 'hold':
+        // Hold has no requirements
+        break;  
+
+      case 'dropped':
+        // Dropped has no requirements (same as Hold)
         break;
 
       case 'rejected':
@@ -291,33 +350,41 @@ export class StageProgressionService {
   /**
    * Validate a manual stage transition
    */
-  async validateStageTransition(leadId: number, organizationId: number, targetStage: string): Promise<StageValidationResult> {
-    const lead = await this.storage.getLead(leadId, organizationId);
-    if (!lead) {
-      return {
-        isValid: false,
-        errors: ['Lead not found'],
-        missingFields: []
-      };
-    }
-
-    // Check if transition is valid
-    if (!this.isValidTransition(lead.stage, targetStage)) {
-      return {
-        isValid: false,
-        errors: [`Invalid stage transition from ${lead.stage} to ${targetStage}`],
-        missingFields: []
-      };
-    }
-
-    // Get lead details for validation
-    const leadDetails = await this.storage.getLeadsByStage(lead.stage, organizationId);
-    const fullLead = leadDetails.find(l => l.id === leadId);
-    const contact = fullLead?.contact;
-    const outreachActivities = await this.storage.getOutreachActivities(leadId, organizationId);
-
-    return this.validateStageRequirements(lead, targetStage, contact, outreachActivities);
+async validateStageTransition(
+  leadId: number,
+  organizationId: number,
+  targetStage: string,
+  leadOverrides: Partial<Lead> = {}
+): Promise<StageValidationResult> {
+  const lead = await this.storage.getLead(leadId, organizationId);
+  if (!lead) {
+    return {
+      isValid: false,
+      errors: ['Lead not found'],
+      missingFields: []
+    };
   }
+
+  // Check if transition is valid using the current stored stage
+  if (!this.isValidTransition(lead.stage, targetStage)) {
+    return {
+      isValid: false,
+      errors: [`Invalid stage transition from ${lead.stage} to ${targetStage}`],
+      missingFields: []
+    };
+  }
+
+  // Get lead details for validation
+  const leadDetails = await this.storage.getLeadsByStage(lead.stage, organizationId);
+  const fullLead = leadDetails.find(l => l.id === leadId);
+  const contact = fullLead?.contact;
+  const outreachActivities = await this.storage.getOutreachActivities(leadId, organizationId);
+
+  // Allow caller to temporarily override fields like notes during validation
+  const effectiveLead = { ...lead, ...leadOverrides } as Lead;
+
+  return this.validateStageRequirements(effectiveLead, targetStage, contact, outreachActivities);
+}
 
   /**
    * Get required fields for a specific stage
@@ -331,13 +398,17 @@ export class StageProgressionService {
       case 'outreach':
         return ['contact.name', 'contact.designation', 'contact.linkedinProfile', 'assignedTo'];
       case 'pitching':
-        return ['contact.name', 'contact.designation', 'contact.linkedinProfile', 'assignedTo', 'outreachActivities'];
+        return ['contact.name', 'contact.designation', 'contact.linkedinProfile', 'assignedTo', 'outreachActivitiesOrMeeting'];
       case 'mandates':
-        return ['contact.name', 'contact.designation', 'contact.linkedinProfile', 'assignedTo', 'outreachActivities', 'Letter of Engagement'];
+        return ['contact.name', 'contact.designation', 'contact.linkedinProfile', 'assignedTo', 'outreachActivities'];
       case 'won':
         return ['contact.name', 'contact.designation', 'contact.linkedinProfile', 'assignedTo', 'outreachActivities', 'Contract', 'notes'];
       case 'lost':
         return ['contact.name', 'contact.designation', 'contact.linkedinProfile', 'assignedTo', 'outreachActivities', 'notes'];
+      case 'hold':
+        return [];
+      case 'dropped':
+        return [];
       case 'rejected':
         return ['notes'];
       default:

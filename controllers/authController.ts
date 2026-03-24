@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import { authService } from '../services/authService.js';
+import { storage } from '../storage.js';
 
 export const authController = {
   // Mock auth endpoints now disabled
@@ -31,6 +32,10 @@ export const authController = {
   getUser: async (req: Request, res: Response) => {
     try {
       const user = await authService.getUser(req);
+      // ✅ Track login time when the frontend fetches the user session
+      if (user && user.id) {
+        storage.updateUserLoginTime(user.id).catch(console.error);
+      }
       res.json(user);
     } catch (error) {
       res.status(500).json({ message: "Failed to fetch user" });

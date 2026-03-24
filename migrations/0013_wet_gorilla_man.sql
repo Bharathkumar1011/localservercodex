@@ -1,0 +1,1 @@
+ALTER TABLE "investor_lead_links" ADD COLUMN "selected_contact_ids" integer[];

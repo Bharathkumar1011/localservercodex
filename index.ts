@@ -4,8 +4,8 @@ import { registerRoutes } from "./routes.js";
 import cors from "cors";
 
 const app = express();
-app.use(express.json());
-app.use(express.urlencoded({ extended: false }));
+app.use(express.json({ limit: "20mb" }));
+app.use(express.urlencoded({ extended: false, limit: "20mb"  }));
 console.log("✅ Server starting wisafasfasfth env:", process.env.NODE_ENV);
 
 // app.use(cors({ origin: "http://localhost:5173", credentials: true }));
