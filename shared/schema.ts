@@ -423,6 +423,10 @@ export const investorLeadLinks = pgTable(
 
     remarks: text("remarks"), // For any additional notes on this investor-lead link
 
+    nextActionText: text("next_action_text"),
+    nextActionAt: timestamp("next_action_at"),
+
+
     createdAt: timestamp("created_at").defaultNow(),
 
 
@@ -462,6 +466,11 @@ export const investorPocOutreachStatus = pgTable(
     lastUpdatedAt: timestamp("last_updated_at").defaultNow().notNull(),
 
     remarks: text("remarks"),
+
+    nextActionText: text("next_action_text"),
+    nextActionAt: timestamp("next_action_at"),
+
+
     cadenceTriggeredAt: timestamp("cadence_triggered_at"),
 
     createdBy: varchar("created_by")
@@ -825,35 +834,59 @@ export type UpdateInvestorData = z.infer<typeof updateInvestorSchema>;
 export type InsertInvestorContactData = z.infer<typeof insertInvestorContactSchema>;
 
 // ✅ NEW TABLE: Pitching Details
+// ✅ NEW TABLE: Pitching Details
 export const pitchingDetails = pgTable("pitching_details", {
   id: serial("id").primaryKey(),
   leadId: integer("lead_id").notNull().references(() => leads.id),
-  
+
   // 1. G-Drive
   gdriveLink: text("gdrive_link"),
-  
-  // 2. Files (Paths to stored files)
+  gdriveNextActionText: text("gdrive_next_action_text"),
+  gdriveNextActionAt: timestamp("gdrive_next_action_at"),
+  gdriveRemarks: text("gdrive_remarks"),
+
+  // 2. Solution Note
   solutionNotePath: text("solution_note_path"),
   solutionNoteName: text("solution_note_name"),
+  solutionNoteNextActionText: text("solution_note_next_action_text"),
+  solutionNoteNextActionAt: timestamp("solution_note_next_action_at"),
+  solutionNoteRemarks: text("solution_note_remarks"),
+
+  // 3. PDM
   pdmPath: text("pdm_path"),
   pdmName: text("pdm_name"),
+  pdmNextActionText: text("pdm_next_action_text"),
+  pdmNextActionAt: timestamp("pdm_next_action_at"),
+  pdmRemarks: text("pdm_remarks"),
 
-  // 3. Meeting 1
+  // 4. Meeting 1
   meeting1Date: timestamp("meeting1_date"),
   meeting1Notes: text("meeting1_notes"),
+  meeting1NextActionText: text("meeting1_next_action_text"),
+  meeting1NextActionAt: timestamp("meeting1_next_action_at"),
+  meeting1Remarks: text("meeting1_remarks"),
 
-  // 4. Meeting 2
+  // 5. Meeting 2
   meeting2Date: timestamp("meeting2_date"),
   meeting2Notes: text("meeting2_notes"),
+  meeting2NextActionText: text("meeting2_next_action_text"),
+  meeting2NextActionAt: timestamp("meeting2_next_action_at"),
+  meeting2Remarks: text("meeting2_remarks"),
 
-  // 5. LOE
+  // 6. LOE
   loeSigned: boolean("loe_signed").default(false),
-
-  // 6. Investor Check
-  investorCheckNotes: text("investor_check_notes"),
+  loeNextActionText: text("loe_next_action_text"),
+  loeNextActionAt: timestamp("loe_next_action_at"),
+  loeRemarks: text("loe_remarks"),
 
   // 7. Mandate
   mandateSigned: boolean("mandate_signed").default(false),
+  mandateNextActionText: text("mandate_next_action_text"),
+  mandateNextActionAt: timestamp("mandate_next_action_at"),
+  mandateRemarks: text("mandate_remarks"),
+
+  // 8. Investor Check
+  investorCheckNotes: text("investor_check_notes"),
 
   updatedAt: timestamp("updated_at").defaultNow(),
 });

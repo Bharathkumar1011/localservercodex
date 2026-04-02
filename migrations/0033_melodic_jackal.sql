@@ -1,0 +1,21 @@
+ALTER TABLE "pitching_details" ADD COLUMN "gdrive_next_action_text" text;--> statement-breakpoint
+ALTER TABLE "pitching_details" ADD COLUMN "gdrive_next_action_at" timestamp;--> statement-breakpoint
+ALTER TABLE "pitching_details" ADD COLUMN "gdrive_remarks" text;--> statement-breakpoint
+ALTER TABLE "pitching_details" ADD COLUMN "solution_note_next_action_text" text;--> statement-breakpoint
+ALTER TABLE "pitching_details" ADD COLUMN "solution_note_next_action_at" timestamp;--> statement-breakpoint
+ALTER TABLE "pitching_details" ADD COLUMN "solution_note_remarks" text;--> statement-breakpoint
+ALTER TABLE "pitching_details" ADD COLUMN "pdm_next_action_text" text;--> statement-breakpoint
+ALTER TABLE "pitching_details" ADD COLUMN "pdm_next_action_at" timestamp;--> statement-breakpoint
+ALTER TABLE "pitching_details" ADD COLUMN "pdm_remarks" text;--> statement-breakpoint
+ALTER TABLE "pitching_details" ADD COLUMN "meeting1_next_action_text" text;--> statement-breakpoint
+ALTER TABLE "pitching_details" ADD COLUMN "meeting1_next_action_at" timestamp;--> statement-breakpoint
+ALTER TABLE "pitching_details" ADD COLUMN "meeting1_remarks" text;--> statement-breakpoint
+ALTER TABLE "pitching_details" ADD COLUMN "meeting2_next_action_text" text;--> statement-breakpoint
+ALTER TABLE "pitching_details" ADD COLUMN "meeting2_next_action_at" timestamp;--> statement-breakpoint
+ALTER TABLE "pitching_details" ADD COLUMN "meeting2_remarks" text;--> statement-breakpoint
+ALTER TABLE "pitching_details" ADD COLUMN "loe_next_action_text" text;--> statement-breakpoint
+ALTER TABLE "pitching_details" ADD COLUMN "loe_next_action_at" timestamp;--> statement-breakpoint
+ALTER TABLE "pitching_details" ADD COLUMN "loe_remarks" text;--> statement-breakpoint
+ALTER TABLE "pitching_details" ADD COLUMN "mandate_next_action_text" text;--> statement-breakpoint
+ALTER TABLE "pitching_details" ADD COLUMN "mandate_next_action_at" timestamp;--> statement-breakpoint
+ALTER TABLE "pitching_details" ADD COLUMN "mandate_remarks" text;

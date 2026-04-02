@@ -328,6 +328,14 @@ export interface IStorage {
     leadId: number
   ): Promise<{ ok: true }>;
 
+    updateInvestorLeadNextAction(
+    organizationId: number,
+    leadId: number,
+    investorId: number,
+    nextActionText: string | null,
+    nextActionAt: Date | null
+  ): Promise<any>;
+
     // News Feed Operations - Only declarations ✅
   getNewsFeed(organizationId: number): Promise<NewsFeedItem[]>;
   createNewsItem(data: InsertNewsFeedItem): Promise<NewsFeedItem>;
@@ -373,7 +381,11 @@ export interface IStorage {
 
 
   // ✅ NEW METHOD for Investor Other Fields
-  getInvestorsForOtherFields(organizationId: number): Promise<Investor[]>;
+  getInvestorsForOtherFields(
+  organizationId: number,
+  user?: any,
+  selectedStages?: string[]
+): Promise<Investor[]>;
 
 
 
@@ -1302,39 +1314,124 @@ const contactsList = await db
 
 
 
+async createCompanyWithDeduplication(companyData: any, organizationId: number) {
+  const normalizedName = companyData.name?.toLowerCase().trim();
+  if (!normalizedName) throw new Error("Company name is required");
 
-  async createCompanyWithDeduplication(companyData: any, organizationId: number) {
-    // Normalize company name
-    const normalizedName = companyData.name?.toLowerCase().trim();
-    if (!normalizedName) throw new Error("Company name is required");
+  const [existingCompany] = await db
+    .select()
+    .from(companies)
+    .where(
+      and(
+        eq(companies.organizationId, organizationId),
+        sql`LOWER(TRIM(${companies.name})) = ${normalizedName}`
+      )
+    );
 
-    // Case-insensitive check for existing company in same organization
-    const [existingCompany] = await db
-      .select()
-      .from(companies)
+  const buildPatch = (incoming: any, existing?: any) => {
+    const patch: any = {};
+
+    const fields = [
+      "sector",
+      "subSector",
+      "location",
+      "financialYear",
+      "revenueInrCr",
+      "ebitdaInrCr",
+      "patInrCr",
+      "foundedYear",
+      "businessDescription",
+      "products",
+      "website",
+      "industry",
+      "statusNextSteps",
+      "remarksFromDinesh",
+      "priority",
+      "leadStatus",
+      "analystFocSfca",
+      "bdFocSfca",
+      "chatgptSummaryReason",
+      "chatgptProposedOffering",
+      "driveLink",
+      "collateral",
+      "description",
+      "channelPartner",
+    ];
+
+    for (const field of fields) {
+      const incomingValue = incoming[field];
+
+      if (
+        incomingValue !== undefined &&
+        incomingValue !== null &&
+        String(incomingValue).trim?.() !== ""
+      ) {
+        const existingValue = existing?.[field];
+
+        const existingBlank =
+          existingValue === undefined ||
+          existingValue === null ||
+          String(existingValue).trim?.() === "";
+
+        if (existingBlank || String(existingValue) !== String(incomingValue)) {
+          patch[field] = incomingValue;
+        }
+      }
+    }
+
+    return patch;
+  };
+
+  if (existingCompany) {
+    const patch = buildPatch(companyData, existingCompany);
+
+    if (Object.keys(patch).length === 0) {
+      return {
+        company: existingCompany,
+        isExisting: true,
+        wasUpdated: false,
+        updatedFields: [],
+      };
+    }
+
+    const [updatedCompany] = await db
+      .update(companies)
+      .set({
+        ...patch,
+        updatedAt: new Date(),
+      })
       .where(
         and(
-          eq(companies.organizationId, organizationId),
-          sql`LOWER(TRIM(${companies.name})) = ${normalizedName}`
+          eq(companies.id, existingCompany.id),
+          eq(companies.organizationId, organizationId)
         )
-      );
-
-    if (existingCompany) {
-      return { company: existingCompany, isExisting: true };
-    }
-
-    // Create new company record
-    const [company] = await db
-      .insert(companies)
-      .values({
-        ...companyData,
-        organizationId,
-        normalizedName,
-      })
+      )
       .returning();
 
-    return { company, isExisting: false };
-    }
+    return {
+      company: updatedCompany,
+      isExisting: true,
+      wasUpdated: true,
+      updatedFields: Object.keys(patch),
+    };
+  }
+
+  const [company] = await db
+    .insert(companies)
+    .values({
+      ...companyData,
+      organizationId,
+      normalizedName,
+    })
+    .returning();
+
+  return {
+    company,
+    isExisting: false,
+    wasUpdated: false,
+    updatedFields: [],
+  };
+}
 
   async bulkCreateCompaniesWithDeduplication(companiesData: InsertCompanyData[], organizationId: number): Promise<Array<{ company: Company; isExisting: boolean; originalIndex: number }>> {
     const results: Array<{ company: Company; isExisting: boolean; originalIndex: number }> = [];
@@ -2289,60 +2386,71 @@ async upsertLeadPocOutreachStatus(
     return record;
   }
 
-  async upsertInvestorPocOutreachStatus(
-    data: UpsertInvestorPocOutreachStatus
-  ): Promise<InvestorPocOutreachStatus> {
-    const existing = await this.getInvestorPocOutreachStatusRecord(
-      data.leadId,
-      data.investorId,
-      data.contactId,
-      data.channel,
-      data.organizationId
-    );
+async upsertInvestorPocOutreachStatus(
+  data: UpsertInvestorPocOutreachStatus
+): Promise<InvestorPocOutreachStatus> {
+  const existing = await this.getInvestorPocOutreachStatusRecord(
+    data.leadId,
+    data.investorId,
+    data.contactId,
+    data.channel,
+    data.organizationId
+  );
 
-    if (existing) {
-      const [updated] = await db
-        .update(investorPocOutreachStatus)
-        .set({
-          status: data.status ?? existing.status ?? null,
-          initiatedAt: data.initiatedAt ?? existing.initiatedAt ?? null,
-          lastUpdatedAt: data.lastUpdatedAt ?? new Date(),
-          remarks: data.remarks !== undefined ? data.remarks : existing.remarks,
-          cadenceTriggeredAt:
-            data.cadenceTriggeredAt ?? existing.cadenceTriggeredAt ?? null,
-          updatedAt: new Date(),
-        })
-        .where(
-          and(
-            eq(investorPocOutreachStatus.id, existing.id),
-            eq(investorPocOutreachStatus.organizationId, data.organizationId)
-          )
-        )
-        .returning();
-
-      return updated;
-    }
-
-    const [created] = await db
-      .insert(investorPocOutreachStatus)
-      .values({
-        organizationId: data.organizationId,
-        leadId: data.leadId,
-        investorId: data.investorId,
-        contactId: data.contactId,
-        channel: data.channel,
-        status: data.status ?? null,
-        initiatedAt: data.initiatedAt ?? null,
+  if (existing) {
+    const [updated] = await db
+      .update(investorPocOutreachStatus)
+      .set({
+        status: data.status ?? existing.status ?? null,
+        initiatedAt: data.initiatedAt ?? existing.initiatedAt ?? null,
         lastUpdatedAt: data.lastUpdatedAt ?? new Date(),
-        remarks: data.remarks ?? null,
-        cadenceTriggeredAt: data.cadenceTriggeredAt ?? null,
-        createdBy: data.createdBy,
+        remarks: data.remarks !== undefined ? data.remarks : existing.remarks,
+        nextActionText:
+          data.nextActionText !== undefined
+            ? data.nextActionText
+            : existing.nextActionText,
+        nextActionAt:
+          data.nextActionAt !== undefined
+            ? data.nextActionAt
+            : existing.nextActionAt,
+        cadenceTriggeredAt:
+          data.cadenceTriggeredAt ?? existing.cadenceTriggeredAt ?? null,
         updatedAt: new Date(),
       })
+      .where(
+        and(
+          eq(investorPocOutreachStatus.id, existing.id),
+          eq(investorPocOutreachStatus.organizationId, data.organizationId)
+        )
+      )
       .returning();
 
-    return created;
+    return updated;
   }
+
+  const [created] = await db
+    .insert(investorPocOutreachStatus)
+    .values({
+      organizationId: data.organizationId,
+      leadId: data.leadId,
+      investorId: data.investorId,
+      contactId: data.contactId,
+      channel: data.channel,
+      status: data.status ?? null,
+      initiatedAt: data.initiatedAt ?? null,
+      lastUpdatedAt: data.lastUpdatedAt ?? new Date(),
+      remarks: data.remarks ?? null,
+      nextActionText: data.nextActionText ?? null,
+      nextActionAt: data.nextActionAt ?? null,
+      cadenceTriggeredAt: data.cadenceTriggeredAt ?? null,
+      createdBy: data.createdBy,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    })
+    .returning();
+
+  return created;
+}
 
 
   // investor data
@@ -2522,26 +2630,33 @@ async getInvestorsByLead(organizationId: number, leadId: number) {
 
       return {
         ...row.investor,
-        
-        // ✅ CHANGE 2: Rename 'linkStatus' to 'status' (Matches frontend: inv.status)
-        status: row.link.status, 
-        
-        // ✅ CHANGE 3: Add 'remarks' (Matches frontend: inv.remarks)
-        remarks: row.link.remarks, 
+
+        status: row.link.status,
+        remarks: row.link.remarks,
+
+        nextActionText: row.link.nextActionText,
+        nextActionAt: row.link.nextActionAt,
 
         linkedAt: row.link.createdAt,
-        
-        // ✅ CHANGE 4: Return 'contacts' (Matches frontend: inv.contacts)
-        contacts: finalContacts, 
+        contacts: finalContacts,
       };
     });
 }
 
 // ✅ CHANGE 5: Add this NEW method immediately after the function above
-  async updateInvestorLeadRemarks(organizationId: number, leadId: number, investorId: number, remarks: string) {
+  async updateInvestorLeadNextAction(
+    organizationId: number,
+    leadId: number,
+    investorId: number,
+    nextActionText: string | null,
+    nextActionAt: Date | null
+  ) {
     const [updated] = await db
       .update(investorLeadLinks)
-      .set({ remarks: remarks })
+      .set({
+        nextActionText,
+        nextActionAt,
+      })
       .where(
         and(
           eq(investorLeadLinks.organizationId, organizationId),
@@ -2550,6 +2665,7 @@ async getInvestorsByLead(organizationId: number, leadId: number) {
         )
       )
       .returning();
+
     return updated;
   }
   
@@ -4145,21 +4261,32 @@ async getInvestorMetrics(
 // }
 
 
-async getInvestorsForOtherFields(organizationId: number, user?: any): Promise<Investor[]> {
-    // ✅ Analysts and Admins/Partners see normal org-wide list
-    const rows = await db
-      .select()
-      .from(investors)
-      .where(eq(investors.organizationId, organizationId));
+async getInvestorsForOtherFields(
+  organizationId: number,
+  user?: any,
+  selectedStages: string[] = ["outreach", "warm", "active", "dealmaking"]
+): Promise<Investor[]> {
+  const normalizedStages =
+    Array.isArray(selectedStages) && selectedStages.length > 0
+      ? selectedStages
+      : ["outreach", "warm", "active", "dealmaking"];
 
-    // Same ordering for consistency
-    return (rows as any[]).sort((a, b) => {
-      const ad = a.updatedAt ? new Date(a.updatedAt).getTime() : 0;
-      const bd = b.updatedAt ? new Date(b.updatedAt).getTime() : 0;
-      return bd - ad;
-    }) as any;
-  }
+  const rows = await db
+    .select()
+    .from(investors)
+    .where(
+      and(
+        eq(investors.organizationId, organizationId),
+        inArray(investors.stage, normalizedStages as any)
+      )
+    );
 
+  return (rows as any[]).sort((a, b) => {
+    const ad = a.updatedAt ? new Date(a.updatedAt).getTime() : 0;
+    const bd = b.updatedAt ? new Date(b.updatedAt).getTime() : 0;
+    return bd - ad;
+  }) as any;
+}
    // ==========================================
   // INVESTOR DEDUPLICATION & BULK IMPORT
   // ==========================================
@@ -4404,53 +4531,58 @@ async getInvestorsForOtherFields(organizationId: number, user?: any): Promise<In
   // ==========================================
 
   // Get data for the specific POC slot (0=Primary/1st, 1=2nd, 2=3rd)
-  async getInvestorPocCoverage(organizationId: number, slotIndex: number, user?: any) {
-    // 1. Get all investors
-    const allInvestors =
-      user && user.role === "analyst"
-        ? (await this.getInvestorsByStage(organizationId, "all", user)).sort((a: any, b: any) =>
-            String(a.name || "").localeCompare(String(b.name || ""))
-          )
-        : await db
-            .select()
-            .from(investors)
-            .where(eq(investors.organizationId, organizationId))
-            .orderBy(asc(investors.name));
+async getInvestorPocCoverage(
+  organizationId: number,
+  slotIndex: number,
+  user?: any,
+  selectedStages: string[] = ["outreach", "warm", "active", "dealmaking"]
+) {
+  const normalizedStages =
+    Array.isArray(selectedStages) && selectedStages.length > 0
+      ? selectedStages
+      : ["outreach", "warm", "active", "dealmaking"];
 
-    // 2. Get all contacts
-    const investorIds = allInvestors.map(i => i.id);
-    if (investorIds.length === 0) return [];
+  const investorWhere = [
+    eq(investors.organizationId, organizationId),
+    inArray(investors.stage, normalizedStages as any),
+  ];
 
-    const allContacts = await db
-      .select()
-      .from(investorContacts)
-      .where(inArray(investorContacts.investorId, investorIds));
+  const allInvestors = await db
+    .select()
+    .from(investors)
+    .where(and(...investorWhere))
+    .orderBy(asc(investors.name));
 
-    // 3. Map to Rows
-    const rows = allInvestors.map(inv => {
-      // Sort contacts: Primary first, then by ID
-      const myContacts = allContacts
-        .filter(c => c.investorId === inv.id)
-        .sort((a, b) => (b.isPrimary === a.isPrimary ? 0 : b.isPrimary ? 1 : -1));
+  const investorIds = allInvestors.map((i) => i.id);
+  if (investorIds.length === 0) return [];
 
-      const targetContact = myContacts[slotIndex]; // Get the contact at this slot
+  const allContacts = await db
+    .select()
+    .from(investorContacts)
+    .where(inArray(investorContacts.investorId, investorIds));
 
-      return {
-        investorId: inv.id,
-        investorName: inv.name,
-        investorType: inv.investorType || "",
-        contactId: targetContact?.id || null, // null if this slot is empty
-        name: targetContact?.name || "",
-        designation: targetContact?.designation || "",
-        phone: targetContact?.phone || "",
-        email: targetContact?.email || "",
-        linkedinProfile: targetContact?.linkedinProfile || "",
-      };
-    });
+  const rows = allInvestors.map((inv) => {
+    const myContacts = allContacts
+      .filter((c) => c.investorId === inv.id)
+      .sort((a, b) => Number(b.isPrimary) - Number(a.isPrimary) || a.id - b.id);
 
-    return rows;
-  }
+    const targetContact = myContacts[slotIndex];
 
+    return {
+      investorId: inv.id,
+      investorName: inv.name,
+      investorType: inv.investorType || "",
+      contactId: targetContact?.id || null,
+      name: targetContact?.name || "",
+      designation: targetContact?.designation || "",
+      phone: targetContact?.phone || "",
+      email: targetContact?.email || "",
+      linkedinProfile: targetContact?.linkedinProfile || "",
+    };
+  });
+
+  return rows;
+}
   // Save data for a specific slot
   async saveInvestorPocSlot(organizationId: number, data: any, slotIndex: number) {
     const { investorId, name, designation, phone, email, linkedinProfile } = data;

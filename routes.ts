@@ -165,6 +165,7 @@ call: [
     "negative",
     "neutral",
   ],
+  other: [],
 } as const;
 
 function isValidLeadPocOutreachStatus(channel: string, status: string) {
@@ -214,14 +215,14 @@ const INVESTOR_POC_OUTREACH_STATUS_OPTIONS = {
     "call_required",
     "neutral",
   ],
-call: [
-  "initiated",
-  "no_response_post_process",
-  "unavailable",
-  "positive",
-  "negative",
-  "neutral",
-],
+  call: [
+    "initiated",
+    "no_response_post_process",
+    "unavailable",
+    "positive",
+    "negative",
+    "neutral",
+  ],
   channel_partner: [
     "initiated",
     "1st_follow_up",
@@ -233,6 +234,7 @@ call: [
     "negative",
     "neutral",
   ],
+  other: [],
 } as const;
 
 function isValidInvestorPocOutreachStatus(channel: string, status: string) {
@@ -297,6 +299,38 @@ function deriveLinkedInvestorStatusFromOutreachRows(
   })[0];
 
   return mapInvestorOutreachStatusToLinkedStatus(latest?.status ?? null);
+}
+
+
+// Investor stage filters 
+const INVESTOR_STAGE_FILTER_VALUES = ["outreach", "warm", "active", "dealmaking"] as const;
+type InvestorStageFilterValue = typeof INVESTOR_STAGE_FILTER_VALUES[number];
+
+function parseInvestorStageFilters(raw: unknown): InvestorStageFilterValue[] | null {
+  const values = Array.isArray(raw)
+    ? raw
+    : typeof raw === "string"
+      ? raw.split(",")
+      : [];
+
+  const cleaned = values
+    .map((v) => String(v).trim().toLowerCase())
+    .filter(Boolean);
+
+  // empty = all stages selected
+  if (cleaned.length === 0 || cleaned.includes("all")) {
+    return [...INVESTOR_STAGE_FILTER_VALUES];
+  }
+
+  const invalid = cleaned.filter(
+    (v) => !INVESTOR_STAGE_FILTER_VALUES.includes(v as InvestorStageFilterValue)
+  );
+
+  if (invalid.length > 0) {
+    return null;
+  }
+
+  return Array.from(new Set(cleaned)) as InvestorStageFilterValue[];
 }
 
 
@@ -1348,6 +1382,128 @@ async function fetchLatestGoogleNews(organizationId: number, category: 'leads' |
       }
     });
 
+
+  // Helper to escape CSV cells for investor export
+        const escapeInvestorCsvCell = (value: unknown) => {
+      const str = value == null ? "" : String(value);
+      return `"${str.replace(/"/g, '""')}"`;
+    };
+
+    const buildInvestorExportCsv = (rows: Array<any>) => {
+      const maxContacts = rows.length
+        ? Math.max(
+            ...rows.map((inv) =>
+              Array.isArray(inv.contacts) ? inv.contacts.length : 0
+            )
+          )
+        : 0;
+
+      const headers = [
+        "Investor Name",
+        "Stage",
+        "Investor Type",
+        "Sector",
+        "Location",
+        "Website",
+        "Description",
+        "Linked Companies Count",
+        "Linked Companies",
+      ];
+
+      for (let i = 1; i <= maxContacts; i++) {
+        headers.push(
+          `POC ${i} Name`,
+          `POC ${i} Designation`,
+          `POC ${i} Email`,
+          `POC ${i} Phone`,
+          `POC ${i} LinkedIn`
+        );
+      }
+
+      const csvRows = [
+        headers.map(escapeInvestorCsvCell).join(","),
+        ...rows.map((inv) => {
+          const contacts = Array.isArray(inv.contacts) ? inv.contacts : [];
+          const linkedCompanies = Array.isArray(inv.linkedLeads)
+            ? inv.linkedLeads
+                .map((lead: any) => lead?.companyName)
+                .filter(Boolean)
+                .join(" | ")
+            : "";
+
+          const row: string[] = [
+            inv?.name ?? "",
+            inv?.stage ?? "",
+            inv?.investorType ?? "",
+            inv?.sector ?? "",
+            inv?.location ?? "",
+            inv?.website ?? "",
+            inv?.description ?? "",
+            String(Array.isArray(inv.linkedLeads) ? inv.linkedLeads.length : 0),
+            linkedCompanies,
+          ];
+
+          for (let i = 0; i < maxContacts; i++) {
+            const contact = contacts[i];
+            row.push(
+              contact?.name ?? "",
+              contact?.designation ?? "",
+              contact?.email ?? "",
+              contact?.phone ?? "",
+              contact?.linkedinProfile ?? ""
+            );
+          }
+
+          return row.map(escapeInvestorCsvCell).join(",");
+        }),
+      ];
+
+      return csvRows.join("\n");
+    };
+
+    app.get(
+      "/api/investors/export",
+      authMiddleware,
+      requireRole(["admin", "partner", "analyst"]),
+      async (req: any, res) => {
+        try {
+          const user = req.verifiedUser;
+          if (!user?.organizationId) {
+            return res.status(401).json({ message: "Unauthorized" });
+          }
+
+          const stage = String(req.query.stage || "all").toLowerCase();
+          const allowed = ["all", "outreach", "warm", "active", "dealmaking"];
+
+          if (!allowed.includes(stage)) {
+            return res.status(400).json({ message: "Invalid stage" });
+          }
+
+          const rows = await storage.getInvestorsByStage(
+            Number(user.organizationId),
+            stage,
+            user
+          );
+
+          const csv = buildInvestorExportCsv(rows);
+          const fileName = `investors_${stage}_${new Date()
+            .toISOString()
+            .slice(0, 10)}.csv`;
+
+          res.setHeader("Content-Type", "text/csv; charset=utf-8");
+          res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
+          res.setHeader("Cache-Control", "no-store");
+
+          return res.status(200).send("\uFEFF" + csv);
+        } catch (e) {
+          console.error("GET /api/investors/export error:", e);
+          res.status(500).json({ message: "Failed to export investors" });
+        }
+      }
+    );
+
+
+
         // ✅ INSERT THE NEW CONTACT METRICS ROUTE HERE
     // This must come BEFORE any route with :investorId or :id to prevent conflicts
     app.get("/api/investors/contact-metrics", authMiddleware, requireRole(["admin","partner","analyst"]), async (req: any, res) => {
@@ -1368,20 +1524,37 @@ async function fetchLatestGoogleNews(organizationId: number, category: 'leads' |
     
     // ✅ INVESTOR POC COVERAGE ROUTES (Add to Investor section)
 
-    // GET /api/investors/poc-coverage/:slot (0, 1, or 2)
-    app.get("/api/investors/poc-coverage/:slot", authMiddleware, requireRole(["admin","partner","analyst"]), async (req: any, res) => {
-      try {
-        const slot = parseInt(req.params.slot);
-        if (isNaN(slot) || slot < 0 || slot > 5) return res.status(400).send("Invalid slot");
-        
-        const user = req.verifiedUser;
-        const rows = await storage.getInvestorPocCoverage(user.organizationId, slot, user);
-        res.json({ items: rows });
-      } catch (e) {
-        console.error("GET poc-coverage error:", e);
-        res.status(500).json({ message: "Failed to fetch POC data" });
-      }
-    });
+// GET /api/investors/poc-coverage/:slot (0, 1, or 2)
+app.get("/api/investors/poc-coverage/:slot", authMiddleware, requireRole(["admin","partner","analyst"]), async (req: any, res) => {
+  try {
+    const slot = parseInt(req.params.slot);
+    if (isNaN(slot) || slot < 0 || slot > 5) {
+      return res.status(400).send("Invalid slot");
+    }
+
+    const user = req.verifiedUser;
+    if (!user?.organizationId) {
+      return res.status(401).json({ message: "Unauthorized" });
+    }
+
+    const selectedStages = parseInvestorStageFilters(req.query.stages);
+    if (!selectedStages) {
+      return res.status(400).json({ message: "Invalid investor stages filter" });
+    }
+
+    const rows = await storage.getInvestorPocCoverage(
+      user.organizationId,
+      slot,
+      user,
+      selectedStages
+    );
+
+    res.json({ items: rows });
+  } catch (e) {
+    console.error("GET poc-coverage error:", e);
+    res.status(500).json({ message: "Failed to fetch POC data" });
+  }
+});
 
     // POST /api/investors/poc-coverage/:slot
     app.post("/api/investors/poc-coverage/:slot", authMiddleware, requireRole(["admin","partner","analyst"]), async (req: any, res) => {
@@ -1429,20 +1602,31 @@ async function fetchLatestGoogleNews(organizationId: number, category: 'leads' |
     // INVESTOR CONTACT MANAGEMENT - OTHER FIELDS
     // ==========================================
 
-    // GET /api/investor-contact-management/other-fields
-    app.get("/api/investor-contact-management/other-fields", authMiddleware, requireRole(["admin", "partner", "analyst"]), async (req: any, res) => {
-      try {
-        const user = req.verifiedUser;
-        if (!user?.organizationId) return res.status(401).json({ message: "Unauthorized" });
+// GET /api/investor-contact-management/other-fields
+app.get("/api/investor-contact-management/other-fields", authMiddleware, requireRole(["admin", "partner", "analyst"]), async (req: any, res) => {
+  try {
+    const user = req.verifiedUser;
+    if (!user?.organizationId) {
+      return res.status(401).json({ message: "Unauthorized" });
+    }
 
-        const data = await storage.getInvestorsForOtherFields(user.organizationId, user);
-        res.json(data);
-      } catch (error) {
-        console.error("Error fetching investor other fields:", error);
-        res.status(500).json({ message: "Failed to fetch investor data" });
-      }
-    });
+    const selectedStages = parseInvestorStageFilters(req.query.stages);
+    if (!selectedStages) {
+      return res.status(400).json({ message: "Invalid investor stages filter" });
+    }
 
+    const data = await storage.getInvestorsForOtherFields(
+      user.organizationId,
+      user,
+      selectedStages
+    );
+
+    res.json(data);
+  } catch (error) {
+    console.error("Error fetching investor other fields:", error);
+    res.status(500).json({ message: "Failed to fetch investor data" });
+  }
+});
     // PATCH /api/investor-contact-management/other-fields/:investorId
     app.patch("/api/investor-contact-management/other-fields/:investorId", authMiddleware, requireRole(["admin", "partner", "analyst"]), async (req: any, res) => {
       try {
@@ -1939,7 +2123,49 @@ app.patch(
   }
 );
 
+app.patch(
+  "/api/leads/:leadId/investors/:investorId/next-action",
+  authMiddleware,
+  requireRole(["admin", "partner", "analyst"]),
+  async (req: any, res) => {
+    try {
+      const user = req.verifiedUser;
+      if (!user?.organizationId) {
+        return res.status(401).json({ message: "Unauthorized" });
+      }
 
+      const leadId = Number(req.params.leadId);
+      const investorId = Number(req.params.investorId);
+      const { nextActionText, nextActionAt } = req.body || {};
+
+      if (!Number.isFinite(leadId) || !Number.isFinite(investorId)) {
+        return res.status(400).json({ message: "Invalid IDs" });
+      }
+
+      let parsedNextActionAt: Date | null = null;
+
+      if (nextActionAt) {
+        parsedNextActionAt = new Date(nextActionAt);
+        if (Number.isNaN(parsedNextActionAt.getTime())) {
+          return res.status(400).json({ message: "Invalid nextActionAt" });
+        }
+      }
+
+      const result = await storage.updateInvestorLeadNextAction(
+        Number(user.organizationId),
+        leadId,
+        investorId,
+        typeof nextActionText === "string" ? nextActionText : null,
+        parsedNextActionAt
+      );
+
+      res.json(result);
+    } catch (e) {
+      console.error("PATCH investor next action error:", e);
+      res.status(500).json({ message: "Failed to update investor next action" });
+    }
+  }
+);
 
 
                   // ==============================
@@ -3049,31 +3275,45 @@ app.post(
       }
 
       const { csvData } = req.body;
+      const isPreview = req.query.preview === "true" || req.body?.preview === true;
+
       if (!csvData || typeof csvData !== "string") {
         return res.status(400).json({ message: "CSV data is required" });
       }
 
       const organizationId = currentUser.organizationId;
 
-      // ✅ robust number parsing
-      function parseNumber(val: any): number | null {
+      const parseNumber = (val: any): number | null => {
         if (val === null || val === undefined) return null;
         const s = String(val).trim();
         if (!s || s.toLowerCase() === "na" || s.toLowerCase() === "n/a") return null;
-        // remove currency symbols/commas
         const cleaned = s.replace(/₹/g, "").replace(/,/g, "").trim();
         const num = Number(cleaned);
         return Number.isFinite(num) ? num : null;
-      }
+      };
+
+      const cleanText = (val: any): string | null => {
+        const s = String(val ?? "").trim();
+        return s ? s : null;
+      };
+
+      const firstNonEmpty = (row: Record<string, any>, keys: string[]) => {
+        for (const key of keys) {
+          const value = row[key];
+          if (value !== undefined && value !== null && String(value).trim() !== "") {
+            return value;
+          }
+        }
+        return null;
+      };
 
       const rows = parse(csvData, {
-        columns: true,           // uses headers as keys
+        columns: true,
         skip_empty_lines: true,
-        bom: true,               // handles BOM in CSVs from Excel/Sheets
+        bom: true,
         relax_quotes: true,
-        relax_column_count: true // ignores extra columns
+        relax_column_count: true,
       }) as Record<string, any>[];
-      console.log("[csv-upload] using csv-parse ✅ rows:", rows.length);
 
       const nonEmptyRows = rows.filter((r) =>
         Object.values(r || {}).some((v) => String(v ?? "").trim() !== "")
@@ -3083,14 +3323,11 @@ app.post(
         return res.status(400).json({ message: "CSV must contain at least one data row" });
       }
 
-
-      // optional safety cap
       const MAX_ROWS = 5000;
       if (rows.length > MAX_ROWS) {
         return res.status(400).json({ message: `Too many rows. Max allowed is ${MAX_ROWS}.` });
       }
 
-      // ✅ preload users for assignment matching (once)
       const orgUsers = await storage.getUsers(organizationId);
       const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
 
@@ -3102,28 +3339,34 @@ app.post(
         const full = norm(`${u.firstName || ""} ${u.lastName || ""}`.trim());
         if (full) userByName.set(full, u.id);
       }
-      
+
       const results = {
         totalRows: rows.length,
         successfulCompanies: 0,
+        updatedCompanies: 0,
+        unchangedExistingCompanies: 0,
         successfulLeads: 0,
+        existingLeads: 0,
         successfulContacts: 0,
+        updatedContacts: 0,
         warnings: [] as Array<{ row: number; warning: string }>,
         errors: [] as Array<{ row: number; error: string }>,
+        previewRows: [] as any[],
       };
 
       for (let i = 0; i < rows.length; i++) {
-        const rowNum = i + 2; // header is row 1
+        const rowNum = i + 2;
+
         try {
           const rowRaw = rows[i] || {};
-
-          // ✅ Normalize headers (trim, collapse spaces, remove \n)
           const row = Object.fromEntries(
             Object.entries(rowRaw).map(([k, v]) => [String(k).replace(/\s+/g, " ").trim(), v])
           ) as Record<string, any>;
 
-          // ---- Company mapping by header name (extra columns ignored automatically)
-          const companyName = (row["Company Name"] ?? row["Company"] ?? row["Name"] ?? "").toString().trim();
+          const companyName = cleanText(
+            firstNonEmpty(row, ["Company Name", "Company", "Name"])
+          );
+
           if (!companyName) {
             results.errors.push({ row: rowNum, error: "Company Name is required" });
             continue;
@@ -3131,38 +3374,27 @@ app.post(
 
           const companyData: any = {
             name: companyName,
-            sector: (row["Sector"] ?? null)?.toString().trim() || null,
-            subSector: (row["Sub-Sector"] ?? row["Sub Sector"] ?? null)?.toString().trim() || null,
-            location: (row["City"] ?? row["Location"] ?? null)?.toString().trim() || null,
-            // FY fields (based on your CSV)
-            financialYear: "FY24",
-            revenueInrCr: parseNumber(row["FY24 Revenue (INR Cr)"]),
-            ebitdaInrCr: parseNumber(row["FY24 EBITDA (INR Cr)"]),
-            patInrCr: parseNumber(row["FY24 PAT (INR Cr)"]),
-            // not present in your CSV, keep null
-            foundedYear: null,
-            businessDescription: null,
-            products: null,
-            website: null,
-            industry: null,
+            sector: cleanText(firstNonEmpty(row, ["Sector"])),
+            subSector: cleanText(firstNonEmpty(row, ["Sub-Sector", "Sub Sector"])),
+            location: cleanText(firstNonEmpty(row, ["City", "Location"])),
+            financialYear: cleanText(firstNonEmpty(row, ["Financial Year", "FY", "FY Label"])) || "FY24",
+            revenueInrCr: parseNumber(firstNonEmpty(row, ["FY24 Revenue (INR Cr)", "Revenue (INR Cr)", "Revenue"])),
+            ebitdaInrCr: parseNumber(firstNonEmpty(row, ["FY24 EBITDA (INR Cr)", "EBITDA (INR Cr)", "EBITDA"])),
+            patInrCr: parseNumber(firstNonEmpty(row, ["FY24 PAT (INR Cr)", "PAT (INR Cr)", "PAT"])),
+            foundedYear: parseNumber(firstNonEmpty(row, ["Founded Year", "Founded"])) ?? null,
+            businessDescription: cleanText(firstNonEmpty(row, ["Business Description", "Description"])),
+            products: cleanText(firstNonEmpty(row, ["Products"])),
+            website: cleanText(firstNonEmpty(row, ["Website"])),
+            industry: cleanText(firstNonEmpty(row, ["Industry"])),
+            analystFocSfca: cleanText(firstNonEmpty(row, ["Analyst PoC SFCA"])),
+            bdFocSfca: cleanText(firstNonEmpty(row, ["BD PoC SFCA", "BD Foc SFCA"])),
           };
 
-          // ✅ Create company with dedupe
-          const companyResult = await storage.createCompanyWithDeduplication(companyData, organizationId);
-          const company = companyResult.company;
-          const companyIdNum = Number(company.id);
-          const isExisting = companyResult.isExisting;
-
-          if (!isExisting) results.successfulCompanies++;
-
-          // ---- Assignment from CSV ("Analyst PoC SFCA")
           let assignedTo: string | null = null;
-          const analystCell = (row["Analyst PoC SFCA"] ?? "").toString().trim();
-          if (analystCell && analystCell.toLowerCase() !== "na" && analystCell.toLowerCase() !== "n/a") {
-            const asEmail = norm(analystCell);
-            const asName = norm(analystCell);
+          const analystCell = cleanText(firstNonEmpty(row, ["Analyst PoC SFCA"]));
 
-            assignedTo = userByEmail.get(asEmail) || userByName.get(asName) || null;
+          if (analystCell && analystCell.toLowerCase() !== "na" && analystCell.toLowerCase() !== "n/a") {
+            assignedTo = userByEmail.get(norm(analystCell)) || userByName.get(norm(analystCell)) || null;
 
             if (!assignedTo) {
               results.warnings.push({
@@ -3172,16 +3404,118 @@ app.post(
             }
           }
 
-          // ---- Lead: create only if it doesn't exist for this company in this org
-          const existingLeads = await storage.getLeadsByCompany(companyIdNum, organizationId);
-          let leadId: number | null = null;
+          const normalizedName = companyName.toLowerCase().trim();
+          const existingCompany = await storage.getCompanyByNormalizedName(normalizedName, organizationId);
 
-          if (!existingLeads || existingLeads.length === 0) {
+          const patchableFields = [
+            "sector",
+            "subSector",
+            "location",
+            "financialYear",
+            "revenueInrCr",
+            "ebitdaInrCr",
+            "patInrCr",
+            "foundedYear",
+            "businessDescription",
+            "products",
+            "website",
+            "industry",
+            "analystFocSfca",
+            "bdFocSfca",
+          ];
+
+          const changedFields: string[] = [];
+          if (existingCompany) {
+            for (const field of patchableFields) {
+              const incomingValue = companyData[field];
+              const existingValue = (existingCompany as any)[field];
+
+              const incomingHasValue =
+                incomingValue !== undefined &&
+                incomingValue !== null &&
+                String(incomingValue).trim?.() !== "";
+
+              const existingBlank =
+                existingValue === undefined ||
+                existingValue === null ||
+                String(existingValue).trim?.() === "";
+
+              if (incomingHasValue && (existingBlank || String(existingValue) !== String(incomingValue))) {
+                changedFields.push(field);
+              }
+            }
+          }
+
+          const existingLeads = existingCompany
+            ? await storage.getLeadsByCompany(Number(existingCompany.id), organizationId)
+            : [];
+
+          const willCreateLead = !existingLeads || existingLeads.length === 0;
+          const existingLeadId = !willCreateLead ? existingLeads[0].id : null;
+
+          const poc1 = {
+            name: cleanText(firstNonEmpty(row, ["POC 1 Name", "Primary Contact Name"])),
+            designation: cleanText(firstNonEmpty(row, ["POC 1 Designation", "Primary Contact Designation"])),
+            email: cleanText(firstNonEmpty(row, ["Email ID 1", "Primary Contact Email"])),
+            phone: cleanText(firstNonEmpty(row, ["Phone Number 1", "Primary Contact Phone"])),
+            linkedinProfile: cleanText(firstNonEmpty(row, ["LinkedIn 1", "Primary Contact LinkedIn"])),
+          };
+
+          const poc2 = {
+            name: cleanText(firstNonEmpty(row, ["POC Name 2", "POC 2 Name"])),
+            designation: cleanText(firstNonEmpty(row, ["POC 2 Designation"])),
+            email: cleanText(firstNonEmpty(row, ["Email ID 2"])),
+            phone: cleanText(firstNonEmpty(row, ["POC 2 Number", "Phone Number 2"])),
+            linkedinProfile: cleanText(firstNonEmpty(row, ["LinkedIn 2"])),
+          };
+
+          if (isPreview) {
+            results.previewRows.push({
+              row: rowNum,
+              companyName,
+              companyAction: existingCompany
+                ? changedFields.length > 0
+                  ? "update_existing_company"
+                  : "existing_company_no_change"
+                : "create_new_company",
+              changedFields,
+              leadAction: willCreateLead ? "create_new_lead" : "existing_lead",
+              existingLeadId,
+              assignedToFound: !!assignedTo,
+              parsedFinancials: {
+                financialYear: companyData.financialYear,
+                revenueInrCr: companyData.revenueInrCr,
+                ebitdaInrCr: companyData.ebitdaInrCr,
+                patInrCr: companyData.patInrCr,
+              },
+              parsedContacts: [poc1, poc2].filter(
+                (c) => c.name || c.designation || c.email || c.phone || c.linkedinProfile
+              ),
+            });
+            continue;
+          }
+
+          const companyResult: any = await storage.createCompanyWithDeduplication(companyData, organizationId);
+          const company = companyResult.company;
+          const companyIdNum = Number(company.id);
+
+          if (!companyResult.isExisting) {
+            results.successfulCompanies++;
+          } else if (companyResult.wasUpdated) {
+            results.updatedCompanies++;
+          } else {
+            results.unchangedExistingCompanies++;
+          }
+
+          let leadId: number | null = null;
+          const actualExistingLeads = await storage.getLeadsByCompany(companyIdNum, organizationId);
+
+          if (!actualExistingLeads || actualExistingLeads.length === 0) {
             const universeStatus = assignedTo ? "assigned" : "open";
 
             const lead = await storage.createLead({
               organizationId,
-              companyId: Number(company.id),
+              companyId: companyIdNum,
               stage: "universe",
               universeStatus,
               ownerAnalystId: assignedTo || (currentUser.role === "analyst" ? currentUser.id : null),
@@ -3197,9 +3531,9 @@ app.post(
             leadId = lead.id;
             results.successfulLeads++;
           } else {
-            // Optional: if universe lead exists and is unassigned, assign it now
-            const lead = existingLeads[0];
+            const lead = actualExistingLeads[0];
             leadId = lead.id;
+            results.existingLeads++;
 
             if (assignedTo && !lead.assignedTo && lead.stage === "universe") {
               await storage.assignLead(
@@ -3213,35 +3547,29 @@ app.post(
             }
           }
 
-          // ---- Contacts: up to 2 from your file (POC 1 primary, POC 2 secondary)
           const existingContacts = await storage.getContactsByCompany(companyIdNum, organizationId);
 
-          const upsertContact = async (
-            incoming: any,
-            isPrimary: boolean
-          ) => {
+          const upsertContact = async (incoming: any, isPrimary: boolean) => {
             const hasAny =
               incoming.name || incoming.email || incoming.phone || incoming.linkedinProfile || incoming.designation;
 
             if (!hasAny) return;
 
-            // find match: primary uses isPrimary, secondary uses email/phone match
             let match = null as any;
 
             if (isPrimary) {
               match = existingContacts.find((c: any) => c.isPrimary);
             } else {
               const emailKey = incoming.email ? norm(incoming.email) : null;
-              const phoneKey = incoming.phone ? incoming.phone.toString().trim() : null;
+              const phoneKey = incoming.phone ? String(incoming.phone).trim() : null;
 
               match = existingContacts.find((c: any) => {
                 const cEmail = c.email ? norm(c.email) : null;
-                const cPhone = c.phone ? c.phone.toString().trim() : null;
+                const cPhone = c.phone ? String(c.phone).trim() : null;
                 return (emailKey && cEmail === emailKey) || (phoneKey && cPhone === phoneKey);
               });
             }
 
-            // update only with non-empty values
             const patch: any = {};
             for (const k of ["name", "designation", "email", "phone", "linkedinProfile"] as const) {
               if (incoming[k]) patch[k] = incoming[k];
@@ -3249,8 +3577,8 @@ app.post(
             patch.isPrimary = isPrimary;
 
             if (match) {
-              await storage.updateContact(match.id, organizationId ,patch);
-              // not counted as "created"
+              await storage.updateContact(match.id, organizationId, patch);
+              results.updatedContacts++;
             } else {
               await storage.createContact({
                 organizationId,
@@ -3262,25 +3590,8 @@ app.post(
             }
           };
 
-          const poc1 = {
-          name: (row["POC 1 Name"] ?? "").toString().trim() || null,
-          designation: (row["POC 1 Designation"] ?? "").toString().trim() || null, // if not present, stays null
-          email: (row["Email ID 1"] ?? row["Primary Contact Email"] ?? "").toString().trim() || null,
-          phone: (row["Phone Number 1"] ?? row["Primary Contact Phone"] ?? "").toString().trim() || null,
-          linkedinProfile: (row["LinkedIn 1"] ?? row["Primary Contact LinkedIn"] ?? "").toString().trim() || null,
-        };
-
-        const poc2 = {
-          name: (row["POC Name 2"] ?? row["POC 2 Name"] ?? "").toString().trim() || null,
-          designation: (row["POC 2 Designation"] ?? "").toString().trim() || null,
-          email: (row["Email ID 2"] ?? "").toString().trim() || null,
-          phone: (row["POC 2 Number"] ?? row["Phone Number 2"] ?? "").toString().trim() || null,
-          linkedinProfile: (row["LinkedIn 2"] ?? "").toString().trim() || null,
-        };
-
           await upsertContact(poc1, true);
           await upsertContact(poc2, false);
-
         } catch (error: any) {
           results.errors.push({
             row: rowNum,
@@ -3288,11 +3599,26 @@ app.post(
           });
         }
       }
-      console.log("[csv-upload] using csv-parse ✅");
+
+      if (isPreview) {
+        return res.json({
+          success: true,
+          preview: true,
+          message: "Preview generated successfully",
+          results: {
+            ...results,
+            companiesToCreate: results.previewRows.filter((r) => r.companyAction === "create_new_company").length,
+            companiesToUpdate: results.previewRows.filter((r) => r.companyAction === "update_existing_company").length,
+            companiesUnchanged: results.previewRows.filter((r) => r.companyAction === "existing_company_no_change").length,
+            leadsToCreate: results.previewRows.filter((r) => r.leadAction === "create_new_lead").length,
+            leadsExisting: results.previewRows.filter((r) => r.leadAction === "existing_lead").length,
+          },
+        });
+      }
 
       return res.json({
         success: true,
-        message: `Upload completed: ${results.successfulCompanies} companies, ${results.successfulLeads} leads, ${results.successfulContacts} contacts`,
+        message: `Upload completed: ${results.successfulCompanies} companies created, ${results.updatedCompanies} companies updated, ${results.successfulLeads} leads created, ${results.successfulContacts} contacts created`,
         results,
       });
     } catch (error: any) {
@@ -5805,32 +6131,37 @@ app.patch('/api/leads/:id/temperature', authMiddleware, validateResourceExists('
           const pocs = availableContacts.map((contact, index) => ({
             slot: index + 1,
             contact,
-              channels: {
-                linkedin:
-                  statusRows.find(
-                    (row) =>
-                      row.contactId === contact.id && row.channel === "linkedin"
-                  ) || null,
-                email:
-                  statusRows.find(
-                    (row) => row.contactId === contact.id && row.channel === "email"
-                  ) || null,
-                whatsapp:
-                  statusRows.find(
-                    (row) =>
-                      row.contactId === contact.id && row.channel === "whatsapp"
-                  ) || null,
-                call:
-                  statusRows.find(
-                    (row) =>
-                      row.contactId === contact.id && row.channel === "call"
-                  ) || null,
-                channel_partner:
-                  statusRows.find(
-                    (row) =>
-                      row.contactId === contact.id && row.channel === "channel_partner"
-                  ) || null,
-              },
+channels: {
+  linkedin:
+    statusRows.find(
+      (row) =>
+        row.contactId === contact.id && row.channel === "linkedin"
+    ) || null,
+  email:
+    statusRows.find(
+      (row) => row.contactId === contact.id && row.channel === "email"
+    ) || null,
+  whatsapp:
+    statusRows.find(
+      (row) =>
+        row.contactId === contact.id && row.channel === "whatsapp"
+    ) || null,
+  call:
+    statusRows.find(
+      (row) =>
+        row.contactId === contact.id && row.channel === "call"
+    ) || null,
+  channel_partner:
+    statusRows.find(
+      (row) =>
+        row.contactId === contact.id && row.channel === "channel_partner"
+    ) || null,
+  other:
+    statusRows.find(
+      (row) =>
+        row.contactId === contact.id && row.channel === "other"
+    ) || null,
+},
           }));
 
           return res.json({
@@ -5874,7 +6205,7 @@ app.patch('/api/leads/:id/temperature', authMiddleware, validateResourceExists('
 
 const bodySchema = z.object({
   contactId: z.coerce.number(),
-  channel: z.enum(["linkedin", "email", "whatsapp", "call", "channel_partner"]),
+  channel: z.enum(["linkedin", "email", "whatsapp", "call", "channel_partner", "other"]),
   status: z.string().trim().min(1).optional(),
   remarks: z.string().optional().nullable(),
   nextActionText: z.string().optional().nullable(),
@@ -6055,37 +6386,42 @@ newValue: JSON.stringify({
             currentUser.organizationId
           );
 
-          const contacts = (linkedInvestor.contacts || []).map((contact: any, index: number) => ({
-            slot: index + 1,
-            contact,
-            channels: {
-              linkedin:
-                statusRows.find(
-                  (row) =>
-                    row.contactId === contact.id && row.channel === "linkedin"
-                ) || null,
-              email:
-                statusRows.find(
-                  (row) => row.contactId === contact.id && row.channel === "email"
-                ) || null,
-              whatsapp:
-                statusRows.find(
-                  (row) =>
-                    row.contactId === contact.id && row.channel === "whatsapp"
-                ) || null,
-              call:
-                statusRows.find(
-                  (row) =>
-                    row.contactId === contact.id && row.channel === "call"
-                ) || null,
-              channel_partner:
-                statusRows.find(
-                  (row) =>
-                    row.contactId === contact.id &&
-                    row.channel === "channel_partner"
-                ) || null,
-            },
-          }));
+      const contacts = (linkedInvestor.contacts || []).map((contact: any, index: number) => ({
+        slot: index + 1,
+        contact,
+        channels: {
+          linkedin:
+            statusRows.find(
+              (row) =>
+                row.contactId === contact.id && row.channel === "linkedin"
+            ) || null,
+          email:
+            statusRows.find(
+              (row) => row.contactId === contact.id && row.channel === "email"
+            ) || null,
+          whatsapp:
+            statusRows.find(
+              (row) =>
+                row.contactId === contact.id && row.channel === "whatsapp"
+            ) || null,
+          call:
+            statusRows.find(
+              (row) =>
+                row.contactId === contact.id && row.channel === "call"
+            ) || null,
+          channel_partner:
+            statusRows.find(
+              (row) =>
+                row.contactId === contact.id &&
+                row.channel === "channel_partner"
+            ) || null,
+          other:
+            statusRows.find(
+              (row) =>
+                row.contactId === contact.id && row.channel === "other"
+            ) || null,
+        },
+      }));
 
           return res.json({
             lead: {
@@ -6154,30 +6490,36 @@ newValue: JSON.stringify({
             });
           }
 
-          const bodySchema = z.object({
-            contactId: z.coerce.number(),
-            channel: z.enum(["linkedin", "email", "whatsapp", "call", "channel_partner"]),
-            status: z.string().trim().min(1).optional(),
-            remarks: z.string().optional().nullable(),
-          });
+const bodySchema = z.object({
+  contactId: z.coerce.number(),
+  channel: z.enum(["linkedin", "email", "whatsapp", "call", "channel_partner", "other"]),
+  status: z.string().trim().min(1).optional(),
+  remarks: z.string().optional().nullable(),
+  nextActionText: z.string().optional().nullable(),
+  nextActionAt: z.coerce.date().optional().nullable(),
+});
 
-          const parsed = bodySchema.parse(req.body);
+const parsed = bodySchema.parse(req.body);
 
-          if (
-            parsed.status &&
-            !isValidInvestorPocOutreachStatus(parsed.channel, parsed.status)
-          ) {
-            return res.status(400).json({
-              message: `Invalid status '${parsed.status}' for channel '${parsed.channel}'`,
-            });
-          }
+if (
+  parsed.status &&
+  !isValidInvestorPocOutreachStatus(parsed.channel, parsed.status)
+) {
+  return res.status(400).json({
+    message: `Invalid status '${parsed.status}' for channel '${parsed.channel}'`,
+  });
+}
 
-          if (parsed.status === undefined && parsed.remarks === undefined) {
-            return res.status(400).json({
-              message: "At least one of status or remarks must be provided",
-            });
-          }
-
+if (
+  parsed.status === undefined &&
+  parsed.remarks === undefined &&
+  parsed.nextActionText === undefined &&
+  parsed.nextActionAt === undefined
+) {
+  return res.status(400).json({
+    message: "At least one of status, remarks, nextActionText, or nextActionAt must be provided",
+  });
+}
           const validContact = (linkedInvestor.contacts || []).find(
             (contact: any) => Number(contact.id) === parsed.contactId
           );
@@ -6202,22 +6544,41 @@ newValue: JSON.stringify({
           if (parsed.status === "initiated" && !initiatedAt) {
             initiatedAt = now;
           }
+                    const isFirstOtherActionSave =
+            parsed.channel === "other" &&
+            !existing &&
+            (
+              parsed.remarks !== undefined ||
+              parsed.nextActionText !== undefined ||
+              parsed.nextActionAt !== undefined
+            );
 
-          const savedRecord = await storage.upsertInvestorPocOutreachStatus({
-            organizationId: currentUser.organizationId,
-            leadId,
-            investorId,
-            contactId: parsed.contactId,
-            channel: parsed.channel,
-            status: parsed.status ?? existing?.status ?? null,
-            initiatedAt,
-            lastUpdatedAt: now,
-            remarks:
-              parsed.remarks !== undefined ? parsed.remarks : existing?.remarks,
-            cadenceTriggeredAt: existing?.cadenceTriggeredAt ?? null,
-            createdBy: existing?.createdBy ?? currentUser.id,
-          });
+          if (isFirstOtherActionSave && !initiatedAt) {
+            initiatedAt = now;
+          }
 
+      const savedRecord = await storage.upsertInvestorPocOutreachStatus({
+        organizationId: currentUser.organizationId,
+        leadId,
+        investorId,
+        contactId: parsed.contactId,
+        channel: parsed.channel,
+        status: parsed.status ?? existing?.status ?? null,
+        initiatedAt,
+        lastUpdatedAt: now,
+        remarks:
+          parsed.remarks !== undefined ? parsed.remarks : existing?.remarks,
+        nextActionText:
+          parsed.nextActionText !== undefined
+            ? parsed.nextActionText
+            : existing?.nextActionText ?? null,
+        nextActionAt:
+          parsed.nextActionAt !== undefined
+            ? parsed.nextActionAt
+            : existing?.nextActionAt ?? null,
+        cadenceTriggeredAt: existing?.cadenceTriggeredAt ?? null,
+        createdBy: existing?.createdBy ?? currentUser.id,
+      });
             const allRows = await storage.getInvestorPocOutreachStatuses(
               leadId,
               investorId,
@@ -6254,6 +6615,8 @@ newValue: JSON.stringify({
               channel: parsed.channel,
               status: savedRecord.status,
               remarks: savedRecord.remarks,
+              nextActionText: savedRecord.nextActionText,
+              nextActionAt: savedRecord.nextActionAt,
               linkedInvestorStatus: nextLinkedStatus,
             }),
           });
@@ -7100,23 +7463,38 @@ newValue: JSON.stringify({
     });
 
 
-        // ✅ Configure Multer to save to disk (Required for Pitching Files)
-// Ensure the uploads folder exists
-if (!fs.existsSync('uploads')) {
-  fs.mkdirSync('uploads');
-}
+        // ✅ Configure Multer to save Pitching files to a dedicated folder
+const pitchingUploadDir = path.join(process.cwd(), "uploads", "pitching-files");
+fs.mkdirSync(pitchingUploadDir, { recursive: true });
 
-const diskStorage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    cb(null, 'uploads/')
+const pitchingDiskStorage = multer.diskStorage({
+  destination: function (_req, _file, cb) {
+    cb(null, pitchingUploadDir);
   },
-  filename: function (req, file, cb) {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9)
-    cb(null, uniqueSuffix + '-' + file.originalname)
-  }
+  filename: function (_req, file, cb) {
+    const safeOriginalName = file.originalname.replace(/[^\w.\-() ]/g, "_");
+    const uniqueSuffix = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
+    cb(null, `${uniqueSuffix}-${safeOriginalName}`);
+  },
 });
 
-const pitchingUpload = multer({ storage: diskStorage });
+const pitchingUpload = multer({
+  storage: pitchingDiskStorage,
+  limits: {
+    fileSize: 25 * 1024 * 1024, // 25 MB
+  },
+  fileFilter: (_req, file, cb) => {
+    const isPdf =
+      file.mimetype === "application/pdf" ||
+      file.originalname.toLowerCase().endsWith(".pdf");
+
+    if (!isPdf) {
+      return cb(new Error("Only PDF files are allowed"));
+    }
+
+    cb(null, true);
+  },
+});
 
 
     // --- PITCHING TRACKER ROUTES ---
@@ -7138,110 +7516,190 @@ const pitchingUpload = multer({ storage: diskStorage });
 // 2. Update Data (Text/Dates/Booleans)
 // 2. Update Data (Text/Dates/Booleans)
    // 2. Update Data (Text/Dates/Booleans)
-    app.post("/api/leads/:id/pitching", async (req, res) => {
-      const leadId = Number(req.params.id);
-      
-      try {
-        console.log("Received pitching update for Lead:", leadId, req.body); 
+app.post("/api/leads/:id/pitching", async (req, res) => {
+  const leadId = Number(req.params.id);
 
-        // Prepare data: Convert date strings to Date objects if they exist
-        const data = { ...req.body };
-        if (data.meeting1Date) data.meeting1Date = new Date(data.meeting1Date);
-        if (data.meeting2Date) data.meeting2Date = new Date(data.meeting2Date);
+  if (isNaN(leadId)) {
+    return res.status(400).json({ message: "Invalid lead ID" });
+  }
 
-        // 1. Save the Pitching Details
-        const updated = await storage.upsertPitchingDetails(leadId, data);
+  try {
+    console.log("Received pitching update for Lead:", leadId, req.body);
 
-        // 2. Fetch User & Lead Data for Logging
-        const currentUser = (req as any).verifiedUser || (req.user?.claims?.sub ? await storage.getUser(req.user.claims.sub) : undefined);
-        
-        if (currentUser) {
-          // ✅ FIX: Fetch the lead to get the correct companyId
-          const lead = await storage.getLead(leadId, currentUser.organizationId);
-          const companyId = lead?.companyId || undefined;
+const data: any = { ...req.body };
 
-          await storage.createActivityLog({
-            organizationId: currentUser.organizationId,
-            userId: currentUser.id,
-            leadId: leadId,
-            companyId: companyId, // ✅ FIX: Pass the valid Company ID
-            action: 'pitching_updated',
-            entityType: 'lead',
-            entityId: leadId,
-            description: 'Updated pitching details (Milestones/Meetings)',
+const dateFields = [
+  "meeting1Date",
+  "meeting2Date",
+  "gdriveNextActionAt",
+  "solutionNoteNextActionAt",
+  "pdmNextActionAt",
+  "meeting1NextActionAt",
+  "meeting2NextActionAt",
+  "loeNextActionAt",
+  "mandateNextActionAt",
+];
+
+for (const field of dateFields) {
+  if (!(field in data)) {
+    continue;
+  }
+
+  if (data[field] === "" || data[field] === undefined) {
+    data[field] = null;
+  } else if (data[field]) {
+    const parsed = new Date(data[field]);
+    if (Number.isNaN(parsed.getTime())) {
+      return res.status(400).json({ message: `Invalid date for ${field}` });
+    }
+    data[field] = parsed;
+  }
+}
+
+    const updated = await storage.upsertPitchingDetails(leadId, data);
+
+    const currentUser =
+      (req as any).verifiedUser ||
+      (req.user?.claims?.sub ? await storage.getUser(req.user.claims.sub) : undefined);
+
+    if (currentUser) {
+      const lead = await storage.getLead(leadId, currentUser.organizationId);
+      const companyId = lead?.companyId || undefined;
+
+      await storage.createActivityLog({
+        organizationId: currentUser.organizationId,
+        userId: currentUser.id,
+        leadId: leadId,
+        companyId: companyId,
+        action: "pitching_updated",
+        entityType: "lead",
+        entityId: leadId,
+        description: "Updated pitching details (inline milestone workspace)",
+      });
+    }
+
+    res.json(updated);
+  } catch (error) {
+    console.error("CRITICAL ERROR saving pitching details:", error);
+    res.status(500).json({
+      message: "Failed to save pitching details",
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+});
+
+app.get("/api/debug/pitching-upload-check", (_req, res) => {
+  res.json({ ok: true, source: "latest-routes-ts-upload-patch" });
+});
+
+    // 3. Upload PDM file
+    app.post("/api/leads/:id/pitching/upload", authMiddleware, (req, res) => {
+      console.log("[PITCHING UPLOAD HIT] leadId =", req.params.id);
+      pitchingUpload.single("file")(req, res, async (uploadError: any) => {
+        if (uploadError) {
+          console.error("Pitching upload middleware error:", uploadError);
+          return res.status(400).json({
+            message: uploadError?.message || "File upload failed during middleware processing",
           });
         }
 
-        res.json(updated);
-        
-      } catch (error) {
-        console.error("CRITICAL ERROR saving pitching details:", error);
-        res.status(500).json({ 
-          message: "Failed to save pitching details", 
-          error: error instanceof Error ? error.message : String(error) 
-        });
-      }
-    });
+        const leadId = Number(req.params.id);
+        const fileType = req.body?.fileType;
 
-    // 3. Upload Files (Solution Note or PDM)
-    // Note: Assuming 'upload' is defined as: const upload = multer({ dest: "uploads/" });
-// 3. Upload Files (Solution Note or PDM)
- // 3. Upload Files (Solution Note or PDM)
-    // ✅ Use pitchingUpload (disk storage) instead of upload (memory storage)
-    app.post("/api/leads/:id/pitching/upload", pitchingUpload.single("file"), async (req, res) => {
-      const leadId = Number(req.params.id);
-      const fileType = req.body.fileType; 
-      
-      if (!req.file || !fileType) {
-        return res.status(400).json({ message: "File or fileType missing" });
-      }
-
-      try {
-        // ✅ Validation: Ensure path exists
-        if (!req.file.path) {
-           throw new Error("Multer failed to generate file path");
+        if (!Number.isFinite(leadId)) {
+          return res.status(400).json({ message: "Invalid lead ID" });
         }
 
-        const updateData: any = {};
-        let readableName = "File";
-
-        if (fileType === "solutionNote") {
-          updateData.solutionNotePath = req.file.path;
-          updateData.solutionNoteName = req.file.originalname;
-          readableName = "Solution Note";
-        } else if (fileType === "pdm") {
-          updateData.pdmPath = req.file.path;
-          updateData.pdmName = req.file.originalname;
-          readableName = "PDM";
+        if (!req.file) {
+          return res.status(400).json({ message: "File missing" });
         }
 
-        const updated = await storage.upsertPitchingDetails(leadId, updateData);
+        if (fileType !== "pdm") {
+          return res.status(400).json({ message: "Invalid fileType. Only 'pdm' is allowed." });
+        }
 
-        // Log Activity
-        // ✅ Cast req to 'any' for both verifiedUser and user properties
-        const currentUser = (req as any).verifiedUser || ((req as any).user?.claims?.sub ? await storage.getUser((req as any).user.claims.sub) : undefined);
-        if (currentUser) {
-           const lead = await storage.getLead(leadId, currentUser.organizationId);
-           const companyId = lead?.companyId || undefined;
-           
-           await storage.createActivityLog({
-            organizationId: currentUser.organizationId,
-            userId: currentUser.id,
-            leadId: leadId,
-            companyId: companyId,
-            action: 'pitching_file_uploaded',
-            entityType: 'lead',
-            entityId: leadId,
-            description: `Uploaded ${readableName}: ${req.file.originalname}`,
+        try {
+          console.log("[PITCHING UPLOAD CALLBACK] fileType =", req.body?.fileType, "file =", req.file?.originalname);
+          if (!req.file.path) {
+            throw new Error("Multer did not return a saved file path");
+          }
+
+          const updated = await storage.upsertPitchingDetails(leadId, {
+            pdmPath: req.file.path,
+            pdmName: req.file.originalname,
+          });
+
+          const currentUser =
+            (req as any).verifiedUser ||
+            ((req as any).user?.claims?.sub
+              ? await storage.getUser((req as any).user.claims.sub)
+              : undefined);
+
+          if (currentUser?.organizationId) {
+            const lead = await storage.getLead(leadId, currentUser.organizationId);
+            const companyId = lead?.companyId || undefined;
+
+            await storage.createActivityLog({
+              organizationId: currentUser.organizationId,
+              userId: currentUser.id,
+              leadId,
+              companyId,
+              action: "pitching_file_uploaded",
+              entityType: "lead",
+              entityId: leadId,
+              description: `Uploaded PDM: ${req.file.originalname}`,
+            });
+          }
+
+          return res.json(updated);
+        } catch (error) {
+          console.error("Pitching upload route error:", error);
+          return res.status(500).json({
+            message: error instanceof Error ? error.message : "Failed to upload PDM",
           });
         }
-
-        res.json(updated);
-      } catch (error) {
-        console.error("Upload error:", error);
-        res.status(500).json({ message: "Failed to upload file" });
-      }
+      });
     });
+
+    // 4. Preview Files
+app.get("/api/leads/:id/pitching/preview/:fileType", async (req, res) => {
+  const leadId = Number(req.params.id);
+  const { fileType } = req.params;
+
+  try {
+    const details = await storage.getPitchingDetails(leadId);
+    if (!details) return res.status(404).send("Details not found");
+
+    let dbPath: string | null = null;
+
+    if (fileType === "solutionNote") {
+      dbPath = details.solutionNotePath;
+    } else if (fileType === "pdm") {
+      dbPath = details.pdmPath;
+    } else {
+      return res.status(400).send("Invalid file type");
+    }
+
+    if (!dbPath) {
+      return res.status(404).send("No file record found for this type");
+    }
+
+    const absolutePath = path.isAbsolute(dbPath)
+      ? dbPath
+      : path.join(process.cwd(), dbPath);
+
+    if (!fs.existsSync(absolutePath)) {
+      return res.status(404).send("File not found on server");
+    }
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", "inline");
+    return res.sendFile(absolutePath);
+  } catch (error) {
+    console.error("Preview route error:", error);
+    res.status(500).send("Preview failed");
+  }
+});
 
     // 4. Download Files
  // 4. Download Files

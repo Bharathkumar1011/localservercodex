@@ -1,0 +1,9 @@
+# Branch References
+acticitylogfix - Fixed activity log display
+auditlogfix - Audit log filter fixes
+bulkstagefix - Bulk assign stage movement fix
+feature-authentication - Login/registration feature
+featureownerflow - Owner flow functionality
+fixes - General fixes
+fixesnow - Recent fixes work
+lotoffixes - Multiple fixes
