@@ -335,51 +335,7 @@ function parseInvestorStageFilters(raw: unknown): InvestorStageFilterValue[] | n
 
 
 
-async function seedEmailInitiatedCadence(params: {
-  leadId: number;
-  organizationId: number;
-  userId: string;
-  contactName?: string | null;
-  anchorDate: Date;
-  remarks?: string | null;
-}) {
-  const baseDate = new Date(params.anchorDate);
-  baseDate.setHours(9, 30, 0, 0);
 
-  const reminders = [
-    { offset: 0, type: "linkedin_request_self" },
-    { offset: 0, type: "linkedin_messages_self" },
-    { offset: 0, type: "linkedin_request_dinesh" },
-    { offset: 0, type: "linkedin_messages_dinesh" },
-    { offset: 0, type: "linkedin_request_kvs" },
-    { offset: 0, type: "linkedin_messages_kvs" },
-
-    { offset: 1, type: "whatsapp_kvs" },
-    { offset: 1, type: "call_d1_dinesh" },
-
-    { offset: 3, type: "email_d3_analyst" },
-    { offset: 3, type: "whatsapp_dinesh" },
-
-    { offset: 7, type: "channel_partner" },
-    { offset: 7, type: "email_d7_kvs" },
-  ];
-
-  const baseNotes =
-    params.remarks?.trim() ||
-    `Auto-created cadence for Email Initiated${params.contactName ? ` - ${params.contactName}` : ""}`;
-
-  for (const reminder of reminders) {
-    await storage.createIntervention({
-      leadId: params.leadId,
-      type: reminder.type,
-      scheduledAt: addDays(baseDate, reminder.offset),
-      notes: baseNotes,
-      organizationId: params.organizationId,
-      userId: params.userId,
-      status: "pending",
-    });
-  }
-}
 
   export async function registerRoutes(app: Express): Promise<Server> {
     
@@ -1831,29 +1787,128 @@ app.get("/api/investor-contact-management/other-fields", authMiddleware, require
 
 
   // Update investor (e.g. sector)
-        app.patch(
-          "/api/investors/:investorId",
-          authMiddleware,
-          requireRole(["admin","partner", "analyst"]),
-          async (req: any, res) => {
-            try {
-              const user = req.verifiedUser;
-              if (!user?.organizationId) return res.status(401).json({ message: "Unauthorized" });
+app.patch(
+  "/api/investors/:investorId",
+  authMiddleware,
+  requireRole(["admin", "partner", "analyst"]),
+  async (req: any, res) => {
+    try {
+      const user = req.verifiedUser;
+      if (!user?.organizationId) {
+        return res.status(401).json({ message: "Unauthorized" });
+      }
 
-              const investorId = Number(req.params.investorId);
-              if (!Number.isFinite(investorId)) return res.status(400).json({ message: "Invalid ID" });
+      const investorId = Number(req.params.investorId);
+      if (!Number.isFinite(investorId)) {
+        return res.status(400).json({ message: "Invalid ID" });
+      }
 
-              const updates = req.body; // e.g. { sector: "IT, HR" }
-              const updated = await storage.updateInvestor(Number(user.organizationId), investorId, updates);
-              
-              if (!updated) return res.status(404).json({ message: "Investor not found" });
-              res.json(updated);
-            } catch (e) {
-              console.error("PATCH /api/investors/:investorId error:", e);
-              res.status(500).json({ message: "Failed to update investor" });
+      const {
+        name,
+        sector,
+        investorType,
+        website,
+        location,
+        description,
+        stage,
+        mandateStatus,
+      } = req.body || {};
+
+      if (
+        mandateStatus !== undefined &&
+        mandateStatus !== null &&
+        !["mandate", "not_mandate"].includes(String(mandateStatus))
+      ) {
+        return res.status(400).json({
+          message: "Invalid mandateStatus. Allowed values: mandate, not_mandate",
+        });
+      }
+
+      const updates: any = {};
+
+      if (name !== undefined) updates.name = name;
+      if (sector !== undefined) updates.sector = sector;
+      if (investorType !== undefined) updates.investorType = investorType;
+      if (website !== undefined) updates.website = website;
+      if (location !== undefined) updates.location = location;
+      if (description !== undefined) updates.description = description;
+      if (stage !== undefined) updates.stage = stage;
+      if (mandateStatus !== undefined) updates.mandateStatus = mandateStatus;
+
+      if (Object.keys(updates).length === 0) {
+        return res.status(400).json({ message: "No valid fields to update" });
+      }
+
+      const updated = await storage.updateInvestor(
+        Number(user.organizationId),
+        investorId,
+        updates
+      );
+
+      if (!updated) {
+        return res.status(404).json({ message: "Investor not found" });
+      }
+
+      res.json(updated);
+    } catch (e) {
+      console.error("PATCH /api/investors/:investorId error:", e);
+      res.status(500).json({ message: "Failed to update investor" });
+    }
+  }
+);
+
+// Update investor card next action (text and date)
+    app.patch(
+      "/api/investors/:investorId/card-next-action",
+      authMiddleware,
+      requireRole(["admin", "partner", "analyst"]),
+      async (req: any, res) => {
+        try {
+          const user = req.verifiedUser;
+          if (!user?.organizationId) {
+            return res.status(401).json({ message: "Unauthorized" });
+          }
+
+          const investorId = Number(req.params.investorId);
+          if (!Number.isFinite(investorId)) {
+            return res.status(400).json({ message: "Invalid ID" });
+          }
+
+          const { cardNextActionText, cardNextActionDate } = req.body || {};
+
+          if (cardNextActionText === undefined && cardNextActionDate === undefined) {
+            return res.status(400).json({ message: "cardNextActionText or cardNextActionDate is required" });
+          }
+
+          let parsedDate: Date | null = null;
+
+          if (cardNextActionDate !== undefined) {
+            if (cardNextActionDate === null || cardNextActionDate === "") {
+              parsedDate = null;
+            } else {
+              parsedDate = new Date(cardNextActionDate);
+              if (isNaN(parsedDate.getTime())) {
+                return res.status(400).json({ message: "Invalid cardNextActionDate" });
+              }
             }
           }
-        );
+
+          const updated = await storage.updateInvestorCardNextAction(
+            Number(user.organizationId),
+            investorId,
+            typeof cardNextActionText === "string" ? (cardNextActionText.trim() || null) : null,
+            parsedDate
+          );
+
+          if (!updated) return res.status(404).json({ message: "Investor not found" });
+
+          res.json(updated);
+        } catch (e) {
+          console.error("PATCH /api/investors/:investorId/card-next-action error:", e);
+          res.status(500).json({ message: "Failed to update investor card next action" });
+        }
+      }
+    );
 
 
      // investor routes
@@ -2136,7 +2191,7 @@ app.patch(
 
       const leadId = Number(req.params.leadId);
       const investorId = Number(req.params.investorId);
-      const { nextActionText, nextActionAt } = req.body || {};
+      const { nextActionText, nextActionAt, taskAssignedTo } = req.body || {};
 
       if (!Number.isFinite(leadId) || !Number.isFinite(investorId)) {
         return res.status(400).json({ message: "Invalid IDs" });
@@ -2150,13 +2205,23 @@ app.patch(
           return res.status(400).json({ message: "Invalid nextActionAt" });
         }
       }
+       if (taskAssignedTo !== undefined && taskAssignedTo !== null) {
+        const assignee = await storage.getUser(String(taskAssignedTo));
+        if (!assignee || Number(assignee.organizationId) !== Number(user.organizationId)) {
+          return res.status(400).json({ message: "Invalid taskAssignedTo user" });
+        }
+      }
 
       const result = await storage.updateInvestorLeadNextAction(
         Number(user.organizationId),
         leadId,
         investorId,
         typeof nextActionText === "string" ? nextActionText : null,
-        parsedNextActionAt
+        parsedNextActionAt,
+        taskAssignedTo !== undefined ? String(taskAssignedTo || "") || null : null,
+        taskAssignedTo !== undefined
+          ? (taskAssignedTo ? String(user.id) : null)
+          : null
       );
 
       res.json(result);
@@ -4888,6 +4953,52 @@ app.post(
       }
     });
 
+
+        // PATCH: Update only card next action for a lead
+    app.patch('/api/leads/:id/card-next-action', authMiddleware, validateResourceExists('lead'), async (req: any, res) => {
+      try {
+        const currentUser = req.verifiedUser;
+        if (!currentUser || !currentUser.organizationId) {
+          return res.status(401).json({ message: 'User organization not found' });
+        }
+
+        const { cardNextActionText, cardNextActionDate } = req.body || {};
+
+        if (cardNextActionText === undefined && cardNextActionDate === undefined) {
+          return res.status(400).json({ message: 'cardNextActionText or cardNextActionDate is required' });
+        }
+
+        let parsedDate: Date | null = null;
+
+        if (cardNextActionDate !== undefined) {
+          if (cardNextActionDate === null || cardNextActionDate === "") {
+            parsedDate = null;
+          } else {
+            parsedDate = new Date(cardNextActionDate);
+            if (isNaN(parsedDate.getTime())) {
+              return res.status(400).json({ message: 'Invalid cardNextActionDate' });
+            }
+          }
+        }
+
+        const updated = await storage.updateLeadCardNextAction(
+          parseInt(req.params.id),
+          currentUser.organizationId,
+          typeof cardNextActionText === 'string' ? (cardNextActionText.trim() || null) : null,
+          parsedDate
+        );
+
+        res.json(updated);
+      } catch (error) {
+        console.error('Error updating lead card next action:', error);
+        res.status(400).json({
+          message: 'Failed to update lead card next action',
+          error: error instanceof Error ? error.message : 'Unknown error'
+        });
+      }
+    });
+
+
    // PATCH: Update only leadSource for a lead
     app.patch('/api/leads/:id/source', authMiddleware, validateResourceExists('lead'), async (req: any, res) => {
       try {
@@ -6210,6 +6321,7 @@ const bodySchema = z.object({
   remarks: z.string().optional().nullable(),
   nextActionText: z.string().optional().nullable(),
   nextActionAt: z.coerce.date().optional().nullable(),
+  taskAssignedTo: z.string().trim().min(1).optional().nullable(),
 });
 
           const parsed = bodySchema.parse(req.body);
@@ -6224,13 +6336,13 @@ if (
   parsed.status === undefined &&
   parsed.remarks === undefined &&
   parsed.nextActionText === undefined &&
-  parsed.nextActionAt === undefined
+  parsed.nextActionAt === undefined &&
+  parsed.taskAssignedTo === undefined
 ) {
   return res.status(400).json({
-    message: "At least one of status, remarks, nextActionText, or nextActionAt must be provided",
+    message: "At least one of status, remarks, nextActionText, nextActionAt, or taskAssignedTo must be provided",
   });
 }
-
           const contact = await storage.getContact(
             parsed.contactId,
             currentUser.organizationId
@@ -6249,6 +6361,15 @@ if (
             currentUser.organizationId
           );
 
+          if (parsed.taskAssignedTo !== undefined && parsed.taskAssignedTo !== null) {
+            const assignee = await storage.getUser(parsed.taskAssignedTo);
+            if (!assignee || Number(assignee.organizationId) !== Number(currentUser.organizationId)) {
+              return res.status(400).json({
+                message: "Invalid taskAssignedTo user",
+              });
+            }
+          }
+
           const now = new Date();
 
           let initiatedAt = existing?.initiatedAt ?? null;
@@ -6256,10 +6377,7 @@ if (
             initiatedAt = now;
           }
 
-          const shouldTriggerEmailCadence =
-            parsed.channel === "email" &&
-            parsed.status === "initiated" &&
-            !existing?.cadenceTriggeredAt;
+
 
 const savedRecord = await storage.upsertLeadPocOutreachStatus({
   organizationId: currentUser.organizationId,
@@ -6279,32 +6397,19 @@ const savedRecord = await storage.upsertLeadPocOutreachStatus({
     parsed.nextActionAt !== undefined
       ? parsed.nextActionAt
       : existing?.nextActionAt ?? null,
-  cadenceTriggeredAt: shouldTriggerEmailCadence
-    ? now
-    : existing?.cadenceTriggeredAt ?? null,
+  taskAssignedTo:
+    parsed.taskAssignedTo !== undefined
+      ? parsed.taskAssignedTo
+      : (existing as any)?.taskAssignedTo ?? null,
+  taskAssignedBy:
+    parsed.taskAssignedTo !== undefined
+      ? (parsed.taskAssignedTo ? currentUser.id : null)
+      : (existing as any)?.taskAssignedBy ?? null,
+cadenceTriggeredAt: existing?.cadenceTriggeredAt ?? null,
   createdBy: existing?.createdBy ?? currentUser.id,
-});
+} as any);
 
-          if (shouldTriggerEmailCadence) {
-            try {
-              await seedEmailInitiatedCadence({
-                leadId,
-                organizationId: currentUser.organizationId,
-                userId: currentUser.id,
-                contactName: contact.name,
-                anchorDate: now,
-                remarks:
-                  parsed.remarks !== undefined
-                    ? parsed.remarks
-                    : existing?.remarks ?? null,
-              });
-            } catch (cadenceError) {
-              console.error(
-                "Error creating automatic email initiated cadence:",
-                cadenceError
-              );
-            }
-          }
+
 
           await storage.createActivityLog({
             organizationId: currentUser.organizationId,
@@ -6497,6 +6602,7 @@ const bodySchema = z.object({
   remarks: z.string().optional().nullable(),
   nextActionText: z.string().optional().nullable(),
   nextActionAt: z.coerce.date().optional().nullable(),
+  taskAssignedTo: z.string().trim().min(1).optional().nullable(),
 });
 
 const parsed = bodySchema.parse(req.body);
@@ -6514,10 +6620,11 @@ if (
   parsed.status === undefined &&
   parsed.remarks === undefined &&
   parsed.nextActionText === undefined &&
-  parsed.nextActionAt === undefined
+  parsed.nextActionAt === undefined &&
+  parsed.taskAssignedTo === undefined
 ) {
   return res.status(400).json({
-    message: "At least one of status, remarks, nextActionText, or nextActionAt must be provided",
+    message: "At least one of status, remarks, nextActionText, nextActionAt, or taskAssignedTo must be provided",
   });
 }
           const validContact = (linkedInvestor.contacts || []).find(
@@ -6538,6 +6645,15 @@ if (
             currentUser.organizationId
           );
 
+          if (parsed.taskAssignedTo !== undefined && parsed.taskAssignedTo !== null) {
+            const assignee = await storage.getUser(parsed.taskAssignedTo);
+            if (!assignee || Number(assignee.organizationId) !== Number(currentUser.organizationId)) {
+              return res.status(400).json({
+                message: "Invalid taskAssignedTo user",
+              });
+            }
+          }
+
           const now = new Date();
 
           let initiatedAt = existing?.initiatedAt ?? null;
@@ -6557,28 +6673,36 @@ if (
             initiatedAt = now;
           }
 
-      const savedRecord = await storage.upsertInvestorPocOutreachStatus({
-        organizationId: currentUser.organizationId,
-        leadId,
-        investorId,
-        contactId: parsed.contactId,
-        channel: parsed.channel,
-        status: parsed.status ?? existing?.status ?? null,
-        initiatedAt,
-        lastUpdatedAt: now,
-        remarks:
-          parsed.remarks !== undefined ? parsed.remarks : existing?.remarks,
-        nextActionText:
-          parsed.nextActionText !== undefined
-            ? parsed.nextActionText
-            : existing?.nextActionText ?? null,
-        nextActionAt:
-          parsed.nextActionAt !== undefined
-            ? parsed.nextActionAt
-            : existing?.nextActionAt ?? null,
-        cadenceTriggeredAt: existing?.cadenceTriggeredAt ?? null,
-        createdBy: existing?.createdBy ?? currentUser.id,
-      });
+const savedRecord = await storage.upsertInvestorPocOutreachStatus({
+  organizationId: currentUser.organizationId,
+  leadId,
+  investorId,
+  contactId: parsed.contactId,
+  channel: parsed.channel,
+  status: parsed.status ?? existing?.status ?? null,
+  initiatedAt,
+  lastUpdatedAt: now,
+  remarks:
+    parsed.remarks !== undefined ? parsed.remarks : existing?.remarks,
+  nextActionText:
+    parsed.nextActionText !== undefined
+      ? parsed.nextActionText
+      : existing?.nextActionText ?? null,
+  nextActionAt:
+    parsed.nextActionAt !== undefined
+      ? parsed.nextActionAt
+      : existing?.nextActionAt ?? null,
+  taskAssignedTo:
+    parsed.taskAssignedTo !== undefined
+      ? parsed.taskAssignedTo
+      : (existing as any)?.taskAssignedTo ?? null,
+  taskAssignedBy:
+    parsed.taskAssignedTo !== undefined
+      ? (parsed.taskAssignedTo ? currentUser.id : null)
+      : (existing as any)?.taskAssignedBy ?? null,
+  cadenceTriggeredAt: existing?.cadenceTriggeredAt ?? null,
+  createdBy: existing?.createdBy ?? currentUser.id,
+} as any);
             const allRows = await storage.getInvestorPocOutreachStatuses(
               leadId,
               investorId,
@@ -6776,35 +6900,60 @@ if (
       }
     });
 
-    app.put('/api/interventions/:id', authMiddleware, validateIntParam('id'), async (req: any, res) => {
-      try {
-        const currentUser = req.verifiedUser || await storage.getUser(req.user?.claims?.sub);
-        if (!currentUser || !currentUser.organizationId) {
-          return res.status(401).json({ message: 'User organization not found' });
-        }
-        
-        const updates = interventionFormSchema
-          .extend({
-            status: z.enum(["pending", "completed"]).optional(),
-          })
-          .partial()
-          .parse(req.body);
+  
+ // Update intervention completion status and log activity
+app.put('/api/interventions/:id', authMiddleware, validateIntParam('id'), async (req: any, res) => {
+  try {
+    const currentUser = req.verifiedUser || await storage.getUser(req.user?.claims?.sub);
+    if (!currentUser || !currentUser.organizationId) {
+      return res.status(401).json({ message: 'User organization not found' });
+    }
 
-        const intervention = await storage.updateIntervention(parseInt(req.params.id), currentUser.organizationId, updates);
-        
-        if (!intervention) {
-          return res.status(404).json({ message: 'Intervention not found' });
-        }
-        
-        res.json(intervention);
-      } catch (error) {
-        console.error('Error updating intervention:', error);
-        res.status(400).json({ 
-          message: 'Failed to update intervention', 
-          error: error instanceof Error ? error.message : 'Unknown error' 
-        });
-      }
+    const interventionId = parseInt(req.params.id);
+
+    const updates = interventionFormSchema
+      .extend({
+        status: z.enum(["pending", "completed"]).optional(),
+      })
+      .partial()
+      .parse(req.body);
+
+    const intervention = await storage.updateIntervention(
+      interventionId,
+      currentUser.organizationId,
+      updates
+    );
+
+    if (!intervention) {
+      return res.status(404).json({ message: 'Intervention not found' });
+    }
+
+    // Optional but recommended: log manual completion
+    if (updates.status === "completed") {
+      const lead = await storage.getLead(intervention.leadId, currentUser.organizationId);
+
+      await storage.createActivityLog({
+        organizationId: currentUser.organizationId,
+        userId: currentUser.id,
+        action: "intervention_completed",
+        entityType: "intervention",
+        entityId: intervention.id,
+        leadId: intervention.leadId,
+        companyId: lead?.companyId ?? null,
+        description: `Marked scheduled task as completed (${intervention.type})`,
+      });
+    }
+
+    res.json(intervention);
+  } catch (error) {
+    console.error('Error updating intervention:', error);
+    res.status(400).json({
+      message: 'Failed to update intervention',
+      error: error instanceof Error ? error.message : 'Unknown error'
     });
+  }
+});
+
 
     app.delete('/api/interventions/:id', authMiddleware, validateIntParam('id'), async (req: any, res) => {
       try {
@@ -7516,7 +7665,7 @@ const pitchingUpload = multer({
 // 2. Update Data (Text/Dates/Booleans)
 // 2. Update Data (Text/Dates/Booleans)
    // 2. Update Data (Text/Dates/Booleans)
-app.post("/api/leads/:id/pitching", async (req, res) => {
+app.post("/api/leads/:id/pitching", authMiddleware, async (req: any, res) => {
   const leadId = Number(req.params.id);
 
   if (isNaN(leadId)) {
@@ -7527,6 +7676,10 @@ app.post("/api/leads/:id/pitching", async (req, res) => {
     console.log("Received pitching update for Lead:", leadId, req.body);
 
 const data: any = { ...req.body };
+
+const currentUser =
+  req.verifiedUser ||
+  (req.user?.claims?.sub ? await storage.getUser(req.user.claims.sub) : undefined);
 
 const dateFields = [
   "meeting1Date",
@@ -7539,6 +7692,34 @@ const dateFields = [
   "loeNextActionAt",
   "mandateNextActionAt",
 ];
+
+const assigneeFieldMap = {
+  pdmTaskAssignedTo: "pdmTaskAssignedBy",
+  meeting1TaskAssignedTo: "meeting1TaskAssignedBy",
+  meeting2TaskAssignedTo: "meeting2TaskAssignedBy",
+  loeTaskAssignedTo: "loeTaskAssignedBy",
+  mandateTaskAssignedTo: "mandateTaskAssignedBy",
+} as const;
+
+for (const [assigneeField, assignedByField] of Object.entries(assigneeFieldMap)) {
+  if (!(assigneeField in data)) continue;
+
+  if (data[assigneeField] === "" || data[assigneeField] === undefined) {
+    data[assigneeField] = null;
+    data[assignedByField] = null;
+    continue;
+  }
+
+  if (data[assigneeField] && currentUser?.organizationId) {
+    const assignee = await storage.getUser(String(data[assigneeField]));
+    if (!assignee || Number(assignee.organizationId) !== Number(currentUser.organizationId)) {
+      return res.status(400).json({ message: `Invalid assignee for ${assigneeField}` });
+    }
+  }
+
+  data[assignedByField] = currentUser?.id || null;
+}
+
 
 for (const field of dateFields) {
   if (!(field in data)) {
@@ -7558,9 +7739,6 @@ for (const field of dateFields) {
 
     const updated = await storage.upsertPitchingDetails(leadId, data);
 
-    const currentUser =
-      (req as any).verifiedUser ||
-      (req.user?.claims?.sub ? await storage.getUser(req.user.claims.sub) : undefined);
 
     if (currentUser) {
       const lead = await storage.getLead(leadId, currentUser.organizationId);

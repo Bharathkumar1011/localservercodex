@@ -148,6 +148,8 @@ export const leads = pgTable("leads", {
   probability: decimal("probability", { precision: 5, scale: 2 }).default('0'), // 0-100
   notes: text("notes"),
   leadSource: varchar("lead_source", { length: 50 }),
+  cardNextActionText: text("card_next_action_text"), // card-level next action (separate from outreach next actions)
+  cardNextActionDate: timestamp("card_next_action_date"),
   chatgptLink: text("chatgpt_link"), // ✅ New field for Drive/ChatGPT URL
   leadTemperature: varchar("lead_temperature", { length: 20 }), // null = Not set, warm, hot
   // createdBy: varchar("created_by", { length: 50 }).notNull(), // User who created this lead
@@ -239,6 +241,12 @@ export const leadPocOutreachStatus = pgTable(
 
     nextActionText: text("next_action_text"),
     nextActionAt: timestamp("next_action_at"),
+
+    taskAssignedTo: varchar("task_assigned_to")
+     .references(() => users.id),
+
+    taskAssignedBy: varchar("task_assigned_by")
+      .references(() => users.id),
 
     cadenceTriggeredAt: timestamp("cadence_triggered_at"),
 
@@ -377,6 +385,12 @@ export const investors = pgTable("investors", {
   // outreach | warm | active | dealmaking
   stage: varchar("stage", { length: 20 }).notNull().default("outreach"),
 
+  // investor-level next action tracking (separate from lead-linked outreach next actions)
+  mandateStatus: varchar("mandate_status", { length: 30 }),
+
+  cardNextActionText: text("card_next_action_text"), // card-level next action (separate from linked-investor next actions)
+  cardNextActionDate: timestamp("card_next_action_date"),
+
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
 });
@@ -426,6 +440,11 @@ export const investorLeadLinks = pgTable(
     nextActionText: text("next_action_text"),
     nextActionAt: timestamp("next_action_at"),
 
+    taskAssignedTo: varchar("task_assigned_to")
+      .references(() => users.id),
+
+    taskAssignedBy: varchar("task_assigned_by")
+      .references(() => users.id),
 
     createdAt: timestamp("created_at").defaultNow(),
 
@@ -470,6 +489,11 @@ export const investorPocOutreachStatus = pgTable(
     nextActionText: text("next_action_text"),
     nextActionAt: timestamp("next_action_at"),
 
+    taskAssignedTo: varchar("task_assigned_to")
+      .references(() => users.id),
+
+    taskAssignedBy: varchar("task_assigned_by")
+      .references(() => users.id),
 
     cadenceTriggeredAt: timestamp("cadence_triggered_at"),
 
@@ -857,6 +881,10 @@ export const pitchingDetails = pgTable("pitching_details", {
   pdmName: text("pdm_name"),
   pdmNextActionText: text("pdm_next_action_text"),
   pdmNextActionAt: timestamp("pdm_next_action_at"),
+  pdmTaskAssignedTo: varchar("pdm_task_assigned_to")
+    .references(() => users.id),
+  pdmTaskAssignedBy: varchar("pdm_task_assigned_by")
+    .references(() => users.id),
   pdmRemarks: text("pdm_remarks"),
 
   // 4. Meeting 1
@@ -864,6 +892,10 @@ export const pitchingDetails = pgTable("pitching_details", {
   meeting1Notes: text("meeting1_notes"),
   meeting1NextActionText: text("meeting1_next_action_text"),
   meeting1NextActionAt: timestamp("meeting1_next_action_at"),
+  meeting1TaskAssignedTo: varchar("meeting1_task_assigned_to")
+    .references(() => users.id),
+  meeting1TaskAssignedBy: varchar("meeting1_task_assigned_by")
+    .references(() => users.id),
   meeting1Remarks: text("meeting1_remarks"),
 
   // 5. Meeting 2
@@ -871,18 +903,30 @@ export const pitchingDetails = pgTable("pitching_details", {
   meeting2Notes: text("meeting2_notes"),
   meeting2NextActionText: text("meeting2_next_action_text"),
   meeting2NextActionAt: timestamp("meeting2_next_action_at"),
+  meeting2TaskAssignedTo: varchar("meeting2_task_assigned_to")
+    .references(() => users.id),
+  meeting2TaskAssignedBy: varchar("meeting2_task_assigned_by")
+    .references(() => users.id),
   meeting2Remarks: text("meeting2_remarks"),
 
   // 6. LOE
   loeSigned: boolean("loe_signed").default(false),
   loeNextActionText: text("loe_next_action_text"),
   loeNextActionAt: timestamp("loe_next_action_at"),
+  loeTaskAssignedTo: varchar("loe_task_assigned_to")
+    .references(() => users.id),
+  loeTaskAssignedBy: varchar("loe_task_assigned_by")
+    .references(() => users.id),
   loeRemarks: text("loe_remarks"),
 
   // 7. Mandate
   mandateSigned: boolean("mandate_signed").default(false),
   mandateNextActionText: text("mandate_next_action_text"),
   mandateNextActionAt: timestamp("mandate_next_action_at"),
+  mandateTaskAssignedTo: varchar("mandate_task_assigned_to")
+    .references(() => users.id),
+  mandateTaskAssignedBy: varchar("mandate_task_assigned_by")
+    .references(() => users.id),
   mandateRemarks: text("mandate_remarks"),
 
   // 8. Investor Check
@@ -965,7 +1009,8 @@ export const epnPartners = pgTable("epn_partners", {
   zone: text("zone"),
   city: text("city"),
   state: text("state"),
-
+  cardNextActionText: text("card_next_action_text"), // card-level next action (separate from epn-lead link remarks/status)
+  cardNextActionDate: timestamp("card_next_action_date"),
   
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),

@@ -1,0 +1,1 @@
+ALTER TABLE "investors" ADD COLUMN "mandate_status" varchar(30);

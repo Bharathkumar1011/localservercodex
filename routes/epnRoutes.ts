@@ -508,6 +508,53 @@ epnRoutes.patch("/:epnId", async (req: any, res) => {
 });
 
 
+/**
+ * PATCH /api/epn/:epnId/card-next-action
+ * Update only the card-level next action for an EPN partner
+ */
+epnRoutes.patch("/:epnId/card-next-action", async (req: any, res) => {
+  try {
+    const orgId = Number(req.verifiedUser?.organizationId);
+    const epnId = Number(req.params.epnId);
+    if (!orgId) return res.status(401).json({ message: "Unauthorized" });
+    if (!epnId) return res.status(400).json({ message: "Invalid epnId" });
+
+    const { cardNextActionText, cardNextActionDate } = req.body || {};
+
+    if (cardNextActionText === undefined && cardNextActionDate === undefined) {
+      return res.status(400).json({ message: "cardNextActionText or cardNextActionDate is required" });
+    }
+
+    let parsedDate: Date | null = null;
+
+    if (cardNextActionDate !== undefined) {
+      if (cardNextActionDate === null || cardNextActionDate === "") {
+        parsedDate = null;
+      } else {
+        parsedDate = new Date(cardNextActionDate);
+        if (isNaN(parsedDate.getTime())) {
+          return res.status(400).json({ message: "Invalid cardNextActionDate" });
+        }
+      }
+    }
+
+    const updated = await storage.updateEpnCardNextAction(
+      orgId,
+      epnId,
+      typeof cardNextActionText === "string" ? (cardNextActionText.trim() || null) : null,
+      parsedDate
+    );
+
+    if (!updated) return res.status(404).json({ message: "Partner not found" });
+
+    res.json(updated);
+  } catch (e) {
+    console.error("EPN card next action update failed:", e);
+    res.status(500).json({ message: "Failed to update EPN card next action" });
+  }
+});
+
+
 
 /**
  * GET /api/epn/bucket-metrics/:bucket

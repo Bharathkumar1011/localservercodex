@@ -154,6 +154,12 @@ export interface IStorage {
   })[]>;
   getLeadsByCompany(companyId: number, organizationId: number): Promise<Lead[]>;
   updateLead(id: number, organizationId: number, updates: Partial<UpsertLead>): Promise<Lead | undefined>;
+  updateLeadCardNextAction(
+    id: number,
+    organizationId: number,
+    cardNextActionText: string | null,
+    cardNextActionDate: Date | null
+  ): Promise<Lead | undefined>;
   assignLead(
     leadId: number,
     organizationId: number,
@@ -213,13 +219,8 @@ export interface IStorage {
   // Intervention operations
   createIntervention(intervention: UpsertIntervention): Promise<Intervention>;
   getInterventions(leadId: number, organizationId: number): Promise<(Intervention & { user: User })[]>;
-  getScheduledInterventions(user: User): Promise<Array<Intervention & { 
-    lead: Lead & { 
-      company: Company; 
-      contact?: Contact;
-    }; 
-    user: User;
-  }>>;
+  getScheduledInterventions(user: User): Promise<any[]>;
+
   updateIntervention(id: number, organizationId: number, updates: Partial<UpsertIntervention>): Promise<Intervention | undefined>;
   deleteIntervention(id: number, organizationId: number): Promise<Intervention | undefined>;
   
@@ -316,6 +317,13 @@ export interface IStorage {
     updates: Partial<Investor>
   ): Promise<Investor | undefined>;
 
+  updateInvestorCardNextAction(
+    organizationId: number,
+    investorId: number,
+    cardNextActionText: string | null,
+    cardNextActionDate: Date | null
+  ): Promise<Investor | undefined>;
+
   addInvestorLeadLink(
     organizationId: number,
     investorId: number,
@@ -333,8 +341,11 @@ export interface IStorage {
     leadId: number,
     investorId: number,
     nextActionText: string | null,
-    nextActionAt: Date | null
+    nextActionAt: Date | null,
+    taskAssignedTo: string | null,
+    taskAssignedBy: string | null
   ): Promise<any>;
+
 
     // News Feed Operations - Only declarations ✅
   getNewsFeed(organizationId: number): Promise<NewsFeedItem[]>;
@@ -446,6 +457,13 @@ export interface IStorage {
   getLinkedLeadsForEpn(organizationId: number, epnId: number): Promise<any[]>;
 
   updateEpnPartnerDetails(orgId: number, epnId: number, data: any): Promise<any>;
+
+  updateEpnCardNextAction(
+    orgId: number,
+    epnId: number,
+    cardNextActionText: string | null,
+    cardNextActionDate: Date | null
+  ): Promise<any>;
 
   // ✅ NEW: Dashboard Activity & Momentum Methods
   getUserActivitySummary(organizationId: number): Promise<any[]>;
@@ -647,6 +665,7 @@ async getUpcomingTasksForLead(leadId: number, organizationId: number) {
       and(
         eq(interventions.leadId, leadId),
         eq(interventions.organizationId, organizationId),
+        eq(interventions.status, "pending"),
         gt(interventions.scheduledAt, new Date()) // only future tasks
       )
     )
@@ -2077,6 +2096,26 @@ const leadMap = new Map<number, Lead & {
     return lead;
   }
 
+  async updateLeadCardNextAction(
+    id: number,
+    organizationId: number,
+    cardNextActionText: string | null,
+    cardNextActionDate: Date | null
+  ): Promise<Lead | undefined> {
+    const [lead] = await db
+      .update(leads)
+      .set({
+        cardNextActionText,
+        cardNextActionDate,
+        updatedAt: new Date(),
+      })
+      .where(and(eq(leads.id, id), eq(leads.organizationId, organizationId)))
+      .returning();
+
+    return lead;
+  }
+
+
   async assignLead(
     leadId: number,
     organizationId: number,
@@ -2302,6 +2341,14 @@ async upsertLeadPocOutreachStatus(
           data.nextActionAt !== undefined
             ? data.nextActionAt
             : existing.nextActionAt,
+        taskAssignedTo:
+          (data as any).taskAssignedTo !== undefined
+            ? (data as any).taskAssignedTo
+            : (existing as any).taskAssignedTo ?? null,
+        taskAssignedBy:
+          (data as any).taskAssignedBy !== undefined
+            ? (data as any).taskAssignedBy
+            : (existing as any).taskAssignedBy ?? null,
         cadenceTriggeredAt:
           data.cadenceTriggeredAt ?? existing.cadenceTriggeredAt ?? null,
         updatedAt: new Date(),
@@ -2330,6 +2377,8 @@ async upsertLeadPocOutreachStatus(
       remarks: data.remarks ?? null,
       nextActionText: data.nextActionText ?? null,
       nextActionAt: data.nextActionAt ?? null,
+      taskAssignedTo: (data as any).taskAssignedTo ?? null,
+      taskAssignedBy: (data as any).taskAssignedBy ?? null,
       cadenceTriggeredAt: data.cadenceTriggeredAt ?? null,
       createdBy: data.createdBy,
       createdAt: new Date(),
@@ -2339,7 +2388,6 @@ async upsertLeadPocOutreachStatus(
 
   return created;
 }
-
 
     async getInvestorPocOutreachStatuses(
     leadId: number,
@@ -2413,6 +2461,15 @@ async upsertInvestorPocOutreachStatus(
           data.nextActionAt !== undefined
             ? data.nextActionAt
             : existing.nextActionAt,
+        taskAssignedTo:
+          (data as any).taskAssignedTo !== undefined
+            ? (data as any).taskAssignedTo
+            : (existing as any).taskAssignedTo ?? null,
+
+        taskAssignedBy:
+          (data as any).taskAssignedBy !== undefined
+            ? (data as any).taskAssignedBy
+            : (existing as any).taskAssignedBy ?? null,
         cadenceTriggeredAt:
           data.cadenceTriggeredAt ?? existing.cadenceTriggeredAt ?? null,
         updatedAt: new Date(),
@@ -2442,6 +2499,8 @@ async upsertInvestorPocOutreachStatus(
       remarks: data.remarks ?? null,
       nextActionText: data.nextActionText ?? null,
       nextActionAt: data.nextActionAt ?? null,
+      taskAssignedTo: (data as any).taskAssignedTo ?? null,
+      taskAssignedBy: (data as any).taskAssignedBy ?? null,
       cadenceTriggeredAt: data.cadenceTriggeredAt ?? null,
       createdBy: data.createdBy,
       createdAt: new Date(),
@@ -2573,6 +2632,29 @@ async upsertInvestorPocOutreachStatus(
     return updated;
   }
 
+  async updateInvestorCardNextAction(
+    organizationId: number,
+    investorId: number,
+    cardNextActionText: string | null,
+    cardNextActionDate: Date | null
+  ): Promise<Investor | undefined> {
+    const [updated] = await db
+      .update(investors)
+      .set({
+        cardNextActionText,
+        cardNextActionDate,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(investors.id, investorId),
+          eq(investors.organizationId, organizationId)
+        )
+      )
+      .returning();
+
+    return updated;
+  }
 
   // NEW: Get all investors linked to a specific lead
 async getInvestorsByLead(organizationId: number, leadId: number) {
@@ -2636,6 +2718,7 @@ async getInvestorsByLead(organizationId: number, leadId: number) {
 
         nextActionText: row.link.nextActionText,
         nextActionAt: row.link.nextActionAt,
+        taskAssignedTo: (row.link as any).taskAssignedTo ?? null,
 
         linkedAt: row.link.createdAt,
         contacts: finalContacts,
@@ -2649,13 +2732,17 @@ async getInvestorsByLead(organizationId: number, leadId: number) {
     leadId: number,
     investorId: number,
     nextActionText: string | null,
-    nextActionAt: Date | null
+    nextActionAt: Date | null,
+    taskAssignedTo: string | null,
+    taskAssignedBy: string | null
   ) {
     const [updated] = await db
       .update(investorLeadLinks)
       .set({
         nextActionText,
         nextActionAt,
+        taskAssignedTo,
+        taskAssignedBy,
       })
       .where(
         and(
@@ -2668,7 +2755,6 @@ async getInvestorsByLead(organizationId: number, leadId: number) {
 
     return updated;
   }
-  
 
 
 
@@ -2911,58 +2997,467 @@ async getLinkedInvestorsForLead(organizationId: number, leadId: number) {
     return intervention;
   }
 
-  async getScheduledInterventions(user: User): Promise<Array<Intervention & { 
-    lead: Lead & { 
-      company: Company; 
-      contact?: Contact;
-    }; 
-    user: User;
-  }>> {
-    if (!user.organizationId) {
-      throw new Error('User organization not found');
-    }
-    
-    console.log('[getScheduledInterventions] User:', { id: user.id, role: user.role, organizationId: user.organizationId });
 
-    const result = await db
-      .select({
-        intervention: interventions,
-        lead: leads,
-        company: companies,
-        contact: contacts,
-        user: users,
-      })
-      .from(interventions)
-      .innerJoin(leads, eq(interventions.leadId, leads.id))
-      .innerJoin(companies, eq(leads.companyId, companies.id))
-      .leftJoin(contacts, and(eq(contacts.companyId, companies.id), eq(contacts.isPrimary, true)))
-      .leftJoin(users, eq(interventions.userId, users.id))
+
+  async getScheduledInterventions(user: User): Promise<any[]> {
+    if (!user.organizationId) {
+      throw new Error("User organization not found");
+    }
+
+    const orgId = Number(user.organizationId);
+    const userId = String(user.id);
+
+    let visibleLeads: any[] = [];
+
+    if (user.role === "analyst") {
+      visibleLeads = await this.getLeadsByAssignee(userId, orgId);
+    } else if (user.role === "partner") {
+      visibleLeads = await this.getLeadsByPartner(userId, orgId);
+    } else {
+      visibleLeads = await this.getAllLeads(orgId);
+    }
+
+    const allowedStages = new Set(["outreach", "pitching", "mandates"]);
+
+    const visibleEligibleLeads = (visibleLeads || []).filter((lead: any) =>
+      allowedStages.has(String(lead?.stage || "").toLowerCase())
+    );
+
+    const allLeads = await this.getAllLeads(orgId);
+    const allEligibleLeads = (allLeads || []).filter((lead: any) =>
+      allowedStages.has(String(lead?.stage || "").toLowerCase())
+    );
+
+    const assignedOutreachLeadRows = await db
+      .select({ leadId: leadPocOutreachStatus.leadId })
+      .from(leadPocOutreachStatus)
       .where(
         and(
-          eq(interventions.organizationId, user.organizationId),
-          eq(interventions.userId, user.id),
-          eq(interventions.status, 'pending')   // ← ADD THIS
+          eq(leadPocOutreachStatus.organizationId, orgId),
+          eq((leadPocOutreachStatus as any).taskAssignedTo, userId),
+          sql`${leadPocOutreachStatus.nextActionAt} IS NOT NULL`
         )
-      )
-      .orderBy(interventions.scheduledAt);
+      );
 
-    console.log('[getScheduledInterventions] Query result count:', result.length);
-    console.log('[getScheduledInterventions] First intervention:', result[0]?.intervention);
+    const assignedPitchingLeadRows = await db
+      .select({ leadId: pitchingDetails.leadId })
+      .from(pitchingDetails)
+      .where(
+        and(
+          sql`${pitchingDetails.pdmTaskAssignedTo} = ${userId}
+              OR ${pitchingDetails.meeting1TaskAssignedTo} = ${userId}
+              OR ${pitchingDetails.meeting2TaskAssignedTo} = ${userId}
+              OR ${pitchingDetails.loeTaskAssignedTo} = ${userId}
+              OR ${pitchingDetails.mandateTaskAssignedTo} = ${userId}`,
+          sql`(
+              ${pitchingDetails.pdmNextActionAt} IS NOT NULL
+              OR ${pitchingDetails.meeting1NextActionAt} IS NOT NULL
+              OR ${pitchingDetails.meeting2NextActionAt} IS NOT NULL
+              OR ${pitchingDetails.loeNextActionAt} IS NOT NULL
+              OR ${pitchingDetails.mandateNextActionAt} IS NOT NULL
+          )`
+        )
+      );
 
-    const mapped = result.map(r => ({
-      ...r.intervention,
-      lead: {
-        ...r.lead,
-        company: r.company,
-        contact: r.contact || undefined,
-      },
-      user: r.user!,
-    }));
-    
-    console.log('[getScheduledInterventions] Returning', mapped.length, 'interventions');
-    return mapped;
+    const assignedInvestorLinkLeadRows = await db
+      .select({ leadId: investorLeadLinks.leadId })
+      .from(investorLeadLinks)
+      .where(
+        and(
+          eq(investorLeadLinks.organizationId, orgId),
+          eq((investorLeadLinks as any).taskAssignedTo, userId),
+          sql`${investorLeadLinks.nextActionAt} IS NOT NULL`
+        )
+      );
+
+    const assignedInvestorPocLeadRows = await db
+      .select({ leadId: investorPocOutreachStatus.leadId })
+      .from(investorPocOutreachStatus)
+      .where(
+        and(
+          eq(investorPocOutreachStatus.organizationId, orgId),
+          eq((investorPocOutreachStatus as any).taskAssignedTo, userId),
+          sql`${investorPocOutreachStatus.nextActionAt} IS NOT NULL`
+        )
+      );
+
+    const assignedLeadIds = new Set<number>([
+      ...assignedOutreachLeadRows.map((r) => Number(r.leadId)),
+      ...assignedPitchingLeadRows.map((r) => Number(r.leadId)),
+      ...assignedInvestorLinkLeadRows.map((r) => Number(r.leadId)),
+      ...assignedInvestorPocLeadRows.map((r) => Number(r.leadId)),
+    ]);
+
+    const finalLeadMap = new Map<number, any>();
+
+    for (const lead of visibleEligibleLeads) {
+      finalLeadMap.set(Number(lead.id), lead);
+    }
+
+    for (const lead of allEligibleLeads) {
+      if (assignedLeadIds.has(Number(lead.id))) {
+        finalLeadMap.set(Number(lead.id), lead);
+      }
+    }
+
+    const eligibleLeads = Array.from(finalLeadMap.values());
+
+    if (eligibleLeads.length === 0) {
+      return [];
+    }
+
+    const leadMap = new Map<number, any>(
+      eligibleLeads.map((lead: any) => [Number(lead.id), lead])
+    );
+
+    const outreachLeadIds = eligibleLeads
+      .filter((lead: any) => String(lead.stage || "").toLowerCase() === "outreach")
+      .map((lead: any) => Number(lead.id));
+
+    const pitchingLeadIds = eligibleLeads
+      .filter((lead: any) => String(lead.stage || "").toLowerCase() === "pitching")
+      .map((lead: any) => Number(lead.id));
+
+    const mandateLeadIds = eligibleLeads
+      .filter((lead: any) => String(lead.stage || "").toLowerCase() === "mandates")
+      .map((lead: any) => Number(lead.id));
+
+    const tasks: any[] = [];
+
+    const formatUserName = (user?: any) => {
+      if (!user) return null;
+      const first = String(user.firstName || "").trim();
+      const last = String(user.lastName || "").trim();
+      const full = `${first} ${last}`.trim();
+      return full || user.email || null;
+    };
+
+    const getTaskOwnerName = (leadBase: any) => {
+      return (
+        formatUserName(leadBase?.assignedToUser) ||
+        formatUserName(leadBase?.ownerAnalystUser) ||
+        formatUserName(leadBase?.createdByUser) ||
+        null
+      );
+    };
+
+    const getTaskCreatedByName = (leadBase: any) => {
+      return formatUserName(leadBase?.createdByUser) || null;
+    };
+
+    const channelLabelMap: Record<string, string> = {
+      linkedin: "LinkedIn",
+      email: "Email",
+      whatsapp: "WhatsApp",
+      call: "Call",
+      channel_partner: "Channel Partner",
+      other: "Other Action",
+    };
+
+    const pushTask = (task: any) => {
+      const existingIndex = tasks.findIndex((t) => t.id === task.id);
+      if (existingIndex >= 0) {
+        tasks[existingIndex] = task;
+      } else {
+        tasks.push(task);
+      }
+    };
+
+    if (outreachLeadIds.length > 0) {
+      const assignedToUserAlias = alias(users, "outreachAssignedToUser");
+      const assignedByUserAlias = alias(users, "outreachAssignedByUser");
+
+      const outreachRows = await db
+        .select({
+          status: leadPocOutreachStatus,
+          contact: contacts,
+          assignedToUser: assignedToUserAlias,
+          assignedByUser: assignedByUserAlias,
+        })
+        .from(leadPocOutreachStatus)
+        .leftJoin(contacts, eq(leadPocOutreachStatus.contactId, contacts.id))
+        .leftJoin(
+          assignedToUserAlias,
+          eq((leadPocOutreachStatus as any).taskAssignedTo, assignedToUserAlias.id)
+        )
+        .leftJoin(
+          assignedByUserAlias,
+          eq((leadPocOutreachStatus as any).taskAssignedBy, assignedByUserAlias.id)
+        )
+        .where(
+          and(
+            eq(leadPocOutreachStatus.organizationId, orgId),
+            inArray(leadPocOutreachStatus.leadId, outreachLeadIds),
+            sql`${leadPocOutreachStatus.nextActionAt} IS NOT NULL`,
+            sql`${leadPocOutreachStatus.status} IS DISTINCT FROM 'completed'`
+          )
+        );
+
+      for (const row of outreachRows) {
+        const leadBase = leadMap.get(Number(row.status.leadId));
+        if (!leadBase) continue;
+
+        pushTask({
+          id: `lead-poc-${row.status.id}`,
+          stage: "outreach",
+          source: "lead_poc_outreach",
+          taskType: row.status.channel,
+          title: `${channelLabelMap[row.status.channel] || row.status.channel} outreach action`,
+          scheduledAt: row.status.nextActionAt,
+          nextActionText: row.status.nextActionText ?? null,
+          notes: row.status.remarks ?? null,
+          taskAssignedTo: (row.status as any).taskAssignedTo ?? null,
+          taskAssignedToName: formatUserName(row.assignedToUser),
+          taskAssignedBy: (row.status as any).taskAssignedBy ?? null,
+          taskAssignedByName: formatUserName(row.assignedByUser),
+          relatedName: row.contact?.name ?? null,
+          ownerName: getTaskOwnerName(leadBase),
+          createdByName: getTaskCreatedByName(leadBase),
+          lead: {
+            ...leadBase,
+            contact: row.contact || leadBase.contact || undefined,
+          },
+        });
+      }
+    }
+
+    if (pitchingLeadIds.length > 0) {
+      const pitchingRows = await db
+        .select()
+        .from(pitchingDetails)
+        .where(inArray(pitchingDetails.leadId, pitchingLeadIds));
+
+      const milestoneConfigs = [
+        {
+          taskType: "pdm",
+          title: "PDM next action",
+          atKey: "pdmNextActionAt",
+          textKey: "pdmNextActionText",
+          remarksKey: "pdmRemarks",
+          assigneeKey: "pdmTaskAssignedTo",
+          assignedByKey: "pdmTaskAssignedBy",
+        },
+        {
+          taskType: "meeting1",
+          title: "Meeting 1 next action",
+          atKey: "meeting1NextActionAt",
+          textKey: "meeting1NextActionText",
+          remarksKey: "meeting1Remarks",
+          assigneeKey: "meeting1TaskAssignedTo",
+          assignedByKey: "meeting1TaskAssignedBy",
+        },
+        {
+          taskType: "meeting2",
+          title: "Meeting 2 next action",
+          atKey: "meeting2NextActionAt",
+          textKey: "meeting2NextActionText",
+          remarksKey: "meeting2Remarks",
+          assigneeKey: "meeting2TaskAssignedTo",
+          assignedByKey: "meeting2TaskAssignedBy",
+        },
+        {
+          taskType: "loe",
+          title: "LOE next action",
+          atKey: "loeNextActionAt",
+          textKey: "loeNextActionText",
+          remarksKey: "loeRemarks",
+          assigneeKey: "loeTaskAssignedTo",
+          assignedByKey: "loeTaskAssignedBy",
+        },
+        {
+          taskType: "mandate",
+          title: "Mandate next action",
+          atKey: "mandateNextActionAt",
+          textKey: "mandateNextActionText",
+          remarksKey: "mandateRemarks",
+          assigneeKey: "mandateTaskAssignedTo",
+          assignedByKey: "mandateTaskAssignedBy",
+        },
+      ] as const;
+
+      const allUserIds = new Set<string>();
+      for (const row of pitchingRows as any[]) {
+        for (const milestone of milestoneConfigs) {
+          const assignedTo = row[milestone.assigneeKey];
+          const assignedBy = row[milestone.assignedByKey];
+          if (assignedTo) allUserIds.add(String(assignedTo));
+          if (assignedBy) allUserIds.add(String(assignedBy));
+        }
+      }
+
+      const userMap = new Map<string, any>();
+      if (allUserIds.size > 0) {
+        const relatedUsers = await db
+          .select()
+          .from(users)
+          .where(inArray(users.id, Array.from(allUserIds)));
+        for (const u of relatedUsers) {
+          userMap.set(String(u.id), u);
+        }
+      }
+
+      for (const row of pitchingRows) {
+        const leadBase = leadMap.get(Number((row as any).leadId));
+        if (!leadBase) continue;
+
+        const rowAny = row as any;
+
+        for (const milestone of milestoneConfigs) {
+          const scheduledAt = rowAny[milestone.atKey];
+          if (!scheduledAt) continue;
+
+          const taskAssignedTo = rowAny[milestone.assigneeKey] ?? null;
+          const taskAssignedBy = rowAny[milestone.assignedByKey] ?? null;
+
+          pushTask({
+            id: `pitching-${rowAny.leadId}-${milestone.taskType}`,
+            stage: "pitching",
+            source: "pitching",
+            taskType: milestone.taskType,
+            title: milestone.title,
+            scheduledAt,
+            nextActionText: rowAny[milestone.textKey] ?? null,
+            notes: rowAny[milestone.remarksKey] ?? null,
+            taskAssignedTo,
+            taskAssignedToName: formatUserName(
+              taskAssignedTo ? userMap.get(String(taskAssignedTo)) : null
+            ),
+            taskAssignedBy,
+            taskAssignedByName: formatUserName(
+              taskAssignedBy ? userMap.get(String(taskAssignedBy)) : null
+            ),
+            relatedName: leadBase.contact?.name ?? null,
+            ownerName: getTaskOwnerName(leadBase),
+            createdByName: getTaskCreatedByName(leadBase),
+            lead: leadBase,
+          });
+        }
+      }
+    }
+
+    if (mandateLeadIds.length > 0) {
+      const investorAssignedToUserAlias = alias(users, "investorAssignedToUser");
+      const investorAssignedByUserAlias = alias(users, "investorAssignedByUser");
+
+      const investorLinkRows = await db
+        .select({
+          link: investorLeadLinks,
+          investor: investors,
+          assignedToUser: investorAssignedToUserAlias,
+          assignedByUser: investorAssignedByUserAlias,
+        })
+        .from(investorLeadLinks)
+        .innerJoin(investors, eq(investorLeadLinks.investorId, investors.id))
+        .leftJoin(
+          investorAssignedToUserAlias,
+          eq((investorLeadLinks as any).taskAssignedTo, investorAssignedToUserAlias.id)
+        )
+        .leftJoin(
+          investorAssignedByUserAlias,
+          eq((investorLeadLinks as any).taskAssignedBy, investorAssignedByUserAlias.id)
+        )
+        .where(
+          and(
+            eq(investorLeadLinks.organizationId, orgId),
+            inArray(investorLeadLinks.leadId, mandateLeadIds),
+            sql`${investorLeadLinks.nextActionAt} IS NOT NULL`,
+            sql`${investorLeadLinks.status} IS DISTINCT FROM 'completed'`
+          )
+        );
+
+      for (const row of investorLinkRows) {
+        const leadBase = leadMap.get(Number(row.link.leadId));
+        if (!leadBase) continue;
+
+      pushTask({
+        id: `investor-link-${row.link.id}`,
+        stage: "mandates",
+        source: "investor_link",
+        taskType: "investor",
+        title: "Investor level next action",
+        scheduledAt: row.link.nextActionAt,
+        nextActionText: row.link.nextActionText ?? null,
+        notes: row.link.remarks ?? null,
+        investorId: Number(row.link.investorId),
+        taskAssignedTo: (row.link as any).taskAssignedTo ?? null,
+        taskAssignedToName: formatUserName(row.assignedToUser),
+        taskAssignedBy: (row.link as any).taskAssignedBy ?? null,
+        taskAssignedByName: formatUserName(row.assignedByUser),
+        relatedName: row.investor?.name ?? null,
+        ownerName: getTaskOwnerName(leadBase),
+        createdByName: getTaskCreatedByName(leadBase),
+        lead: leadBase,
+      });
+      }
+
+      const investorPocAssignedToUserAlias = alias(users, "investorPocAssignedToUser");
+      const investorPocAssignedByUserAlias = alias(users, "investorPocAssignedByUser");
+
+      const investorPocRows = await db
+        .select({
+          status: investorPocOutreachStatus,
+          investor: investors,
+          contact: investorContacts,
+          assignedToUser: investorPocAssignedToUserAlias,
+          assignedByUser: investorPocAssignedByUserAlias,
+        })
+        .from(investorPocOutreachStatus)
+        .innerJoin(investors, eq(investorPocOutreachStatus.investorId, investors.id))
+        .leftJoin(investorContacts, eq(investorPocOutreachStatus.contactId, investorContacts.id))
+        .leftJoin(
+          investorPocAssignedToUserAlias,
+          eq((investorPocOutreachStatus as any).taskAssignedTo, investorPocAssignedToUserAlias.id)
+        )
+        .leftJoin(
+          investorPocAssignedByUserAlias,
+          eq((investorPocOutreachStatus as any).taskAssignedBy, investorPocAssignedByUserAlias.id)
+        )
+        .where(
+          and(
+            eq(investorPocOutreachStatus.organizationId, orgId),
+            inArray(investorPocOutreachStatus.leadId, mandateLeadIds),
+            sql`${investorPocOutreachStatus.nextActionAt} IS NOT NULL`,
+            sql`${investorPocOutreachStatus.status} IS DISTINCT FROM 'completed'`
+          )
+        );
+
+      for (const row of investorPocRows) {
+        const leadBase = leadMap.get(Number(row.status.leadId));
+        if (!leadBase) continue;
+
+        const channelLabel =
+          channelLabelMap[row.status.channel] || row.status.channel || "Action";
+
+        pushTask({
+          id: `investor-poc-${row.status.id}`,
+          stage: "mandates",
+          source: "investor_poc_outreach",
+          taskType: row.status.channel,
+          title: `${channelLabel} investor outreach action`,
+          scheduledAt: row.status.nextActionAt,
+          nextActionText: row.status.nextActionText ?? null,
+          notes: row.status.remarks ?? null,
+          taskAssignedTo: (row.status as any).taskAssignedTo ?? null,
+          taskAssignedToName: formatUserName(row.assignedToUser),
+          taskAssignedBy: (row.status as any).taskAssignedBy ?? null,
+          taskAssignedByName: formatUserName(row.assignedByUser),
+          relatedName: row.contact?.name
+            ? `${row.investor?.name || "Investor"} • ${row.contact.name}`
+            : row.investor?.name || null,
+          ownerName: getTaskOwnerName(leadBase),
+          createdByName: getTaskCreatedByName(leadBase),
+          lead: leadBase,
+        });
+      }
+    }
+
+    return tasks.sort((a, b) => {
+      const aTime = a?.scheduledAt ? new Date(a.scheduledAt).getTime() : 0;
+      const bTime = b?.scheduledAt ? new Date(b.scheduledAt).getTime() : 0;
+      return aTime - bTime;
+    });
   }
-
+  
   // Activity logging operations
   async createActivityLog(activityData: UpsertActivityLog): Promise<ActivityLog> {
     const [activity] = await db.insert(activityLog).values(activityData).returning();
@@ -5681,6 +6176,26 @@ async updateEpnPartnerDetails(orgId: number, epnId: number, data: any) {
       })
       .where(and(eq(epnPartners.organizationId, orgId), eq(epnPartners.id, epnId)))
       .returning();
+    return updated;
+  }
+
+
+  async updateEpnCardNextAction(
+    orgId: number,
+    epnId: number,
+    cardNextActionText: string | null,
+    cardNextActionDate: Date | null
+  ) {
+    const [updated] = await db
+      .update(epnPartners)
+      .set({
+        cardNextActionText,
+        cardNextActionDate,
+        updatedAt: new Date(),
+      })
+      .where(and(eq(epnPartners.organizationId, orgId), eq(epnPartners.id, epnId)))
+      .returning();
+
     return updated;
   }
 
