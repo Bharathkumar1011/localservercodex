@@ -1195,6 +1195,8 @@ async clearNewsFeed(organizationId: number, category: string): Promise<void> {
 
     // const investorIds = investorsList.map((i) => i.id);
 async getInvestorsByStage(organizationId: number, stage: string, user?: any) {
+  const perfStart = Date.now();
+  console.log(`[PERF][STORAGE] getInvestorsByStage start stage=${stage}`);
     // A. Filter Investors by Organization and Stage
     const conditions: any[] = [eq(investors.organizationId, organizationId)];
     if (stage !== "all") conditions.push(eq(investors.stage, stage));
@@ -1238,11 +1240,17 @@ async getInvestorsByStage(organizationId: number, stage: string, user?: any) {
       );
     }
 
+    const investorsQueryStart = Date.now();
+
     const investorsList = await db
       .select()
       .from(investors)
       .where(and(...conditions))
-      .orderBy(asc(investors.name)); 
+      .orderBy(asc(investors.name));
+
+    console.log(
+      `[PERF][STORAGE] investors base query stage=${stage} rows=${investorsList.length} ms=${Date.now() - investorsQueryStart}`
+    );
       
     if (investorsList.length === 0) return [];
     
@@ -1251,23 +1259,35 @@ async getInvestorsByStage(organizationId: number, stage: string, user?: any) {
     // ... leave the rest of the method exactly as it is (Contacts mapping, etc)
     // B. ✅ Bulk Fetch ALL Contacts for these investors
     // Sorting by Primary first ensures they appear correctly in the UI cards
+    const contactsQueryStart = Date.now();
+
     const contactsList = await db
       .select()
       .from(investorContacts)
       .where(inArray(investorContacts.investorId, investorIds))
       .orderBy(desc(investorContacts.isPrimary), desc(investorContacts.id));
 
+    console.log(
+      `[PERF][STORAGE] investor contacts query stage=${stage} rows=${contactsList.length} ms=${Date.now() - contactsQueryStart}`
+    );
+
     // C. Bulk Fetch Linked Leads
-    const links = await db
-      .select({
-        investorId: investorLeadLinks.investorId,
-        leadId: leads.id,
-        companyName: companies.name,
-      })
-      .from(investorLeadLinks)
-      .innerJoin(leads, eq(investorLeadLinks.leadId, leads.id))
-      .innerJoin(companies, eq(leads.companyId, companies.id))
-      .where(inArray(investorLeadLinks.investorId, investorIds));
+const linksQueryStart = Date.now();
+
+const links = await db
+  .select({
+    investorId: investorLeadLinks.investorId,
+    leadId: leads.id,
+    companyName: companies.name,
+  })
+  .from(investorLeadLinks)
+  .innerJoin(leads, eq(investorLeadLinks.leadId, leads.id))
+  .innerJoin(companies, eq(leads.companyId, companies.id))
+  .where(inArray(investorLeadLinks.investorId, investorIds));
+
+console.log(
+  `[PERF][STORAGE] investor linked leads query stage=${stage} rows=${links.length} ms=${Date.now() - linksQueryStart}`
+);
 
     // D. Map data efficiently
     const contactsMap = new Map<number, InvestorContact[]>();
@@ -1286,15 +1306,27 @@ async getInvestorsByStage(organizationId: number, stage: string, user?: any) {
     });
 
     // E. Return combined object
-    return investorsList.map((inv) => {
-      const contacts = contactsMap.get(inv.id) || [];
-      return {
-        ...inv,
-        contacts: contacts, // ✅ This array populates the Dropdown
-        primaryPoc: contacts.find(c => c.isPrimary) || contacts[0], // Backward compatibility
-        linkedLeads: linksMap.get(inv.id) || [],
-      };
-    });
+const mappingStart = Date.now();
+
+const finalRows = investorsList.map((inv) => {
+  const contacts = contactsMap.get(inv.id) || [];
+  return {
+    ...inv,
+    contacts: contacts,
+    primaryPoc: contacts.find(c => c.isPrimary) || contacts[0],
+    linkedLeads: linksMap.get(inv.id) || [],
+  };
+});
+
+console.log(
+  `[PERF][STORAGE] mapping stage=${stage} rows=${finalRows.length} ms=${Date.now() - mappingStart}`
+);
+
+console.log(
+  `[PERF][STORAGE] getInvestorsByStage end stage=${stage} total_ms=${Date.now() - perfStart}`
+);
+
+return finalRows;
   }
 
  // 2. Updated Single Fetch: ✅ NOW INCLUDES CONTACTS

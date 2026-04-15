@@ -1032,7 +1032,9 @@ async function fetchLatestGoogleNews(organizationId: number, category: 'leads' |
           organizationId: user.organizationId
         });
 
-        const item = await storage.createNewsItem(data);
+        const item = await storage.createNewsItem(
+          
+        );
         res.json(item);
       } catch (error) {
         console.error('Error creating news item:', error);
@@ -1330,7 +1332,15 @@ async function fetchLatestGoogleNews(organizationId: number, category: 'leads' |
           return res.status(400).json({ message: "Invalid stage" });
         }
 
+        const routeStart = Date.now();
+        console.log(`[PERF][ROUTE] /api/investors start stage=${stage}`);
+
         const data = await storage.getInvestorsByStage(user.organizationId, stage, user);
+
+        console.log(
+          `[PERF][ROUTE] /api/investors end stage=${stage} count=${data.length} total_ms=${Date.now() - routeStart}`
+        );
+
         res.json(data);
       } catch (e) {
         console.error("GET /api/investors error:", e);
