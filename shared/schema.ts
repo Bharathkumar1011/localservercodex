@@ -391,6 +391,13 @@ export const investors = pgTable("investors", {
   cardNextActionText: text("card_next_action_text"), // card-level next action (separate from linked-investor next actions)
   cardNextActionDate: timestamp("card_next_action_date"),
 
+
+  // ✅ Soft delete fields
+  isDeleted: boolean("is_deleted").notNull().default(false),
+  deletedAt: timestamp("deleted_at"),
+  deletedBy: varchar("deleted_by").references(() => users.id),
+
+
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
 });

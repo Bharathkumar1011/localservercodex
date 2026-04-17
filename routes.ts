@@ -880,6 +880,39 @@ function parseInvestorStageFilters(raw: unknown): InvestorStageFilterValue[] | n
       }
     });
 
+        // ✅ NEW ROUTE: Unified Dashboard Search
+    app.get('/api/dashboard/unified-search', authMiddleware, async (req: any, res) => {
+      try {
+        const user = req.verifiedUser;
+        if (!user || !user.organizationId) {
+          return res.status(401).json({ message: "Unauthorized" });
+        }
+
+        const q = String(req.query.q || "").trim();
+
+        if (q.length < 2) {
+          return res.json({
+            query: q,
+            results: [],
+            counts: { leads: 0, investors: 0, epns: 0 },
+            epnAccess: user.role !== "analyst",
+          });
+        }
+
+        const data = await storage.searchUnifiedDashboard(
+          Number(user.organizationId),
+          q,
+          user
+        );
+
+        res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.json(data);
+      } catch (error) {
+        console.error('Error fetching unified dashboard search results:', error);
+        res.status(500).json({ message: 'Failed to fetch unified dashboard search results' });
+      }
+    });
+
 
 
 
@@ -1701,6 +1734,90 @@ app.get("/api/investor-contact-management/other-fields", authMiddleware, require
             res.status(500).json({ message: "Failed to create investor" });
           }
         });
+
+// GET deleted investors for potential restore - admin only (analyst and partner can see but not restore)
+    app.get(
+      "/api/investors/deleted",
+      authMiddleware,
+      requireRole(["admin", "partner", "analyst"]),
+      async (req: any, res) => {
+        try {
+          const user = req.verifiedUser;
+          if (!user?.organizationId) return res.status(401).json({ message: "Unauthorized" });
+
+          const rows = await storage.getDeletedInvestors(Number(user.organizationId));
+          res.json(rows);
+        } catch (e) {
+          console.error("GET /api/investors/deleted error:", e);
+          res.status(500).json({ message: "Failed to fetch deleted investors" });
+        }
+      }
+    );
+
+    app.patch(
+      "/api/investors/:investorId/soft-delete",
+      authMiddleware,
+      requireRole(["admin", "partner", "analyst"]),
+      async (req: any, res) => {
+        try {
+          const user = req.verifiedUser;
+          if (!user?.organizationId) return res.status(401).json({ message: "Unauthorized" });
+
+          const investorId = Number(req.params.investorId);
+          if (!Number.isFinite(investorId) || investorId <= 0) {
+            return res.status(400).json({ message: "Invalid investorId" });
+          }
+
+          const deleted = await storage.softDeleteInvestor(
+            Number(user.organizationId),
+            investorId,
+            String(user.id)
+          );
+
+          if (!deleted) {
+            return res.status(404).json({ message: "Investor not found" });
+          }
+
+          res.json({ success: true, investor: deleted });
+        } catch (e) {
+          console.error("PATCH /api/investors/:investorId/soft-delete error:", e);
+          res.status(500).json({ message: "Failed to delete investor" });
+        }
+      }
+    );
+
+    app.patch(
+      "/api/investors/:investorId/restore",
+      authMiddleware,
+      requireRole(["admin", "partner", "analyst"]),
+      async (req: any, res) => {
+        try {
+          const user = req.verifiedUser;
+          if (!user?.organizationId) return res.status(401).json({ message: "Unauthorized" });
+
+          const investorId = Number(req.params.investorId);
+          if (!Number.isFinite(investorId) || investorId <= 0) {
+            return res.status(400).json({ message: "Invalid investorId" });
+          }
+
+          const restored = await storage.restoreInvestor(
+            Number(user.organizationId),
+            investorId
+          );
+
+          if (!restored) {
+            return res.status(404).json({ message: "Deleted investor not found" });
+          }
+
+          res.json({ success: true, investor: restored });
+        } catch (e) {
+          console.error("PATCH /api/investors/:investorId/restore error:", e);
+          res.status(500).json({ message: "Failed to restore investor" });
+        }
+      }
+    );
+
+
 
 
             // ✅ NEW: Get unique investor locations for dropdowns

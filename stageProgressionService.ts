@@ -129,13 +129,7 @@ isValidTransition(fromStage: string, toStage: string): boolean {
         break;
 
       case 'outreach':
-        // Requires qualified stage requirements PLUS lead must be assigned
-        const qualifiedValidation = await this.validateStageRequirements(lead, 'qualified', contact, outreachActivities);
-        if (!qualifiedValidation.isValid) {
-          errors.push(...qualifiedValidation.errors);
-          missingFields.push(...qualifiedValidation.missingFields);
-        }
-        
+        // Outreach requires only assignment
         if (!lead.assignedTo) {
           errors.push('Lead must be assigned to a team member before outreach');
           missingFields.push('assignedTo');
@@ -396,15 +390,15 @@ async validateStageTransition(
       case 'qualified':
         return ['contact.name', 'contact.designation', 'contact.linkedinProfile'];
       case 'outreach':
-        return ['contact.name', 'contact.designation', 'contact.linkedinProfile', 'assignedTo'];
+        return ['assignedTo'];
       case 'pitching':
-        return ['contact.name', 'contact.designation', 'contact.linkedinProfile', 'assignedTo', 'outreachActivitiesOrMeeting'];
+        return ['assignedTo', 'outreachActivitiesOrMeeting'];
       case 'mandates':
-        return ['contact.name', 'contact.designation', 'contact.linkedinProfile', 'assignedTo', 'outreachActivities'];
+        return ['assignedTo', 'outreachActivities'];
       case 'won':
-        return ['contact.name', 'contact.designation', 'contact.linkedinProfile', 'assignedTo', 'outreachActivities', 'Contract', 'notes'];
+        return ['assignedTo', 'outreachActivities', 'Contract', 'notes'];
       case 'lost':
-        return ['contact.name', 'contact.designation', 'contact.linkedinProfile', 'assignedTo', 'outreachActivities', 'notes'];
+        return ['assignedTo', 'outreachActivities', 'notes'];
       case 'hold':
         return [];
       case 'dropped':

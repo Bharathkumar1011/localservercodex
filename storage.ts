@@ -324,6 +324,21 @@ export interface IStorage {
     cardNextActionDate: Date | null
   ): Promise<Investor | undefined>;
 
+    softDeleteInvestor(
+    organizationId: number,
+    investorId: number,
+    deletedBy: string
+  ): Promise<Investor | undefined>;
+
+  restoreInvestor(
+    organizationId: number,
+    investorId: number
+  ): Promise<Investor | undefined>;
+
+  getDeletedInvestors(
+    organizationId: number
+  ): Promise<Array<Investor & { contacts: InvestorContact[]; linkedLeads: any[] }>>;
+
   addInvestorLeadLink(
     organizationId: number,
     investorId: number,
@@ -387,6 +402,32 @@ export interface IStorage {
     totalInvestors: number;
     linkedInvestors: number;
     totalLinks: number;
+  }>;
+
+    searchUnifiedDashboard(
+    organizationId: number,
+    query: string,
+    user?: any
+  ): Promise<{
+    query: string;
+    results: Array<{
+      entityType: "lead" | "investor" | "epn";
+      cardTypeLabel: "LeadCard" | "InvestorCard" | "EpnCard";
+      id: number;
+      title: string;
+      subtitle?: string | null;
+      matchedOn?: string | null;
+      matchedValue?: string | null;
+      stage?: string | null;
+      bucket?: string | null;
+      navigatePath: string;
+    }>;
+    counts: {
+      leads: number;
+      investors: number;
+      epns: number;
+    };
+    epnAccess: boolean;
   }>;
 
 
@@ -1198,7 +1239,10 @@ async getInvestorsByStage(organizationId: number, stage: string, user?: any) {
   const perfStart = Date.now();
   console.log(`[PERF][STORAGE] getInvestorsByStage start stage=${stage}`);
     // A. Filter Investors by Organization and Stage
-    const conditions: any[] = [eq(investors.organizationId, organizationId)];
+     const conditions: any[] = [
+      eq(investors.organizationId, organizationId),
+      eq(investors.isDeleted, false),
+    ];
     if (stage !== "all") conditions.push(eq(investors.stage, stage));
 
     // ✅ HYBRID ANALYST VISIBILITY
@@ -1339,7 +1383,8 @@ return finalRows;
       .where(
         and(
           eq(investors.organizationId, organizationId),
-          eq(investors.id, investorId)
+          eq(investors.id, investorId),
+          eq(investors.isDeleted, false)
         )
       );
 
@@ -2624,7 +2669,8 @@ async upsertInvestorPocOutreachStatus(
       .where(
         and(
           eq(investors.id, investorId),
-          eq(investors.organizationId, organizationId)
+          eq(investors.organizationId, organizationId),
+          eq(investors.isDeleted, false)
         )
       )
       .returning();
@@ -2638,7 +2684,12 @@ async upsertInvestorPocOutreachStatus(
     const rows = await db
       .selectDistinct({ location: investors.location })
       .from(investors)
-      .where(eq(investors.organizationId, organizationId));
+      .where(
+        and(
+          eq(investors.organizationId, organizationId),
+          eq(investors.isDeleted, false)
+        )
+      );
     
     // Filter out nulls and empty strings in JavaScript, and sort alphabetically
     return rows
@@ -2656,7 +2707,8 @@ async upsertInvestorPocOutreachStatus(
       .where(
         and(
           eq(investors.id, investorId),
-          eq(investors.organizationId, organizationId)
+          eq(investors.organizationId, organizationId),
+          eq(investors.isDeleted, false)
         )
       )
       .returning();
@@ -2680,12 +2732,121 @@ async upsertInvestorPocOutreachStatus(
       .where(
         and(
           eq(investors.id, investorId),
-          eq(investors.organizationId, organizationId)
+          eq(investors.organizationId, organizationId),
+          eq(investors.isDeleted, false)
         )
       )
       .returning();
 
     return updated;
+  }
+
+    async softDeleteInvestor(
+    organizationId: number,
+    investorId: number,
+    deletedBy: string
+  ): Promise<Investor | undefined> {
+    const [updated] = await db
+      .update(investors)
+      .set({
+        isDeleted: true,
+        deletedAt: new Date(),
+        deletedBy,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(investors.id, investorId),
+          eq(investors.organizationId, organizationId),
+          eq(investors.isDeleted, false)
+        )
+      )
+      .returning();
+
+    return updated;
+  }
+
+  async restoreInvestor(
+    organizationId: number,
+    investorId: number
+  ): Promise<Investor | undefined> {
+    const [updated] = await db
+      .update(investors)
+      .set({
+        isDeleted: false,
+        deletedAt: null,
+        deletedBy: null,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(investors.id, investorId),
+          eq(investors.organizationId, organizationId),
+          eq(investors.isDeleted, true)
+        )
+      )
+      .returning();
+
+    return updated;
+  }
+
+  async getDeletedInvestors(organizationId: number) {
+    const investorsList = await db
+      .select()
+      .from(investors)
+      .where(
+        and(
+          eq(investors.organizationId, organizationId),
+          eq(investors.isDeleted, true)
+        )
+      )
+      .orderBy(desc(investors.deletedAt), asc(investors.name));
+
+    if (investorsList.length === 0) return [];
+
+    const investorIds = investorsList.map((i) => i.id);
+
+    const contactsList = await db
+      .select()
+      .from(investorContacts)
+      .where(inArray(investorContacts.investorId, investorIds))
+      .orderBy(desc(investorContacts.isPrimary), desc(investorContacts.id));
+
+    const links = await db
+      .select({
+        investorId: investorLeadLinks.investorId,
+        leadId: leads.id,
+        companyName: companies.name,
+      })
+      .from(investorLeadLinks)
+      .innerJoin(leads, eq(investorLeadLinks.leadId, leads.id))
+      .innerJoin(companies, eq(leads.companyId, companies.id))
+      .where(inArray(investorLeadLinks.investorId, investorIds));
+
+    const contactsMap = new Map<number, InvestorContact[]>();
+    contactsList.forEach((c) => {
+      if (!contactsMap.has(c.investorId)) contactsMap.set(c.investorId, []);
+      contactsMap.get(c.investorId)!.push(c);
+    });
+
+    const linksMap = new Map<number, any[]>();
+    links.forEach((l) => {
+      if (!linksMap.has(l.investorId)) linksMap.set(l.investorId, []);
+      linksMap.get(l.investorId)!.push({
+        leadId: l.leadId,
+        companyName: l.companyName,
+      });
+    });
+
+    return investorsList.map((inv) => {
+      const contacts = contactsMap.get(inv.id) || [];
+      return {
+        ...inv,
+        contacts,
+        primaryPoc: contacts.find((c) => c.isPrimary) || contacts[0],
+        linkedLeads: linksMap.get(inv.id) || [],
+      };
+    });
   }
 
   // NEW: Get all investors linked to a specific lead
@@ -2708,7 +2869,8 @@ async getInvestorsByLead(organizationId: number, leadId: number) {
       .where(
         and(
           eq(investorLeadLinks.organizationId, organizationId),
-          eq(investorLeadLinks.leadId, leadId)
+          eq(investorLeadLinks.leadId, leadId),
+          eq(investors.isDeleted, false)
         )
       )
       .orderBy(desc(investorLeadLinks.createdAt));
@@ -3900,8 +4062,12 @@ async getInvestorMetrics(
     active: number;
     warm: number;
     dealmaking: number;
+    deleted: number;
   }> {
-    const conditions: any[] = [eq(investors.organizationId, organizationId)];
+    const conditions: any[] = [
+      eq(investors.organizationId, organizationId),
+      eq(investors.isDeleted, false),
+    ];
 
     // ✅ SANDBOXED METRICS FOR ANALYSTS
     // Metrics ONLY count investors they added or are linked to their leads
@@ -3940,12 +4106,54 @@ async getInvestorMetrics(
       .from(investors)
       .where(and(...conditions));
 
+    const deletedConditions: any[] = [
+      eq(investors.organizationId, organizationId),
+      eq(investors.isDeleted, true),
+    ];
+
+    // ✅ Keep analyst sandbox behavior same for deleted count too
+    if (user && user.role === "analyst") {
+      const userId = String(user.id);
+
+      deletedConditions.push(
+        or(
+          eq(investors.createdByUserId, userId),
+          sql`EXISTS (
+            SELECT 1 FROM investor_user_access iua
+            WHERE iua.organization_id = ${organizationId}
+              AND iua.investor_id = ${investors.id}
+              AND iua.user_id = ${userId}
+          )`,
+          sql`EXISTS (
+            SELECT 1
+            FROM investor_lead_links ill
+            JOIN leads l ON l.id = ill.lead_id
+            WHERE ill.organization_id = ${organizationId}
+              AND ill.investor_id = ${investors.id}
+              AND l.organization_id = ${organizationId}
+              AND (
+                l.owner_analyst_id = ${userId}
+                OR l.assigned_to = ${userId}
+                OR l.created_by = ${userId}
+                OR ${userId} = ANY(l.assigned_interns)
+              )
+          )`
+        )
+      );
+    }
+
+    const deletedList = await db
+      .select()
+      .from(investors)
+      .where(and(...deletedConditions));
+
     const counts = {
-      totalInvestors: list.length, // Analyst only sees their personal count
+      totalInvestors: list.length,
       outreach: 0,
       active: 0,
       warm: 0,
       dealmaking: 0,
+      deleted: deletedList.length,
     };
 
     for (const inv of list) {
@@ -7325,6 +7533,217 @@ async updateEpnPartnerDetails(orgId: number, epnId: number, data: any) {
     const prevWeek = await getMetrics(prevWeekStart, currentWeekStart);
 
     return { currentWeek, prevWeek };
+  }
+
+    async searchUnifiedDashboard(organizationId: number, rawQuery: string, user?: any) {
+    const query = String(rawQuery || "").trim().toLowerCase();
+
+    if (!query) {
+      return {
+        query: rawQuery,
+        results: [],
+        counts: { leads: 0, investors: 0, epns: 0 },
+        epnAccess: user?.role !== "analyst",
+      };
+    }
+
+    const findFirstMatch = (
+      fields: Array<{ matchedOn: string; matchedValue?: string | null }>
+    ) => {
+      for (const field of fields) {
+        const value = String(field.matchedValue || "").trim();
+        if (value && value.toLowerCase().includes(query)) {
+          return {
+            matchedOn: field.matchedOn,
+            matchedValue: value,
+          };
+        }
+      }
+      return null;
+    };
+
+    const leadStagePathMap: Record<string, string> = {
+      universe: "/universe",
+      qualified: "/qualified",
+      outreach: "/outreach",
+      pitching: "/pitching",
+      mandates: "/mandates",
+      completed_mandate: "/completed-mandate",
+      hold: "/hold",
+      dropped: "/dropped",
+      rejected: "/rejected",
+      won: "/deals-won",
+      lost: "/deals-lost",
+    };
+
+    const investorStagePathMap: Record<string, string> = {
+      outreach: "/investor-relation/investor-management/outreach",
+      warm: "/investor-relation/investor-management/warm",
+      active: "/investor-relation/investor-management/active",
+      dealmaking: "/investor-relation/investor-management/dealmaking",
+    };
+
+    let visibleLeads: any[] = [];
+    if (user?.role === "analyst") {
+      visibleLeads = await this.getLeadsByAssignee(String(user.id), organizationId);
+    } else if (user?.role === "partner") {
+      visibleLeads = await this.getLeadsByPartner(String(user.id), organizationId);
+    } else {
+      visibleLeads = await this.getAllLeads(organizationId);
+    }
+
+    const leadResults = visibleLeads
+      .map((lead: any) => {
+        const leadContacts = Array.isArray(lead.contacts)
+          ? lead.contacts
+          : lead.contact
+            ? [lead.contact]
+            : [];
+
+        const contactNameMatch = leadContacts.find((c: any) =>
+          String(c?.name || "").toLowerCase().includes(query)
+        );
+        const contactEmailMatch = leadContacts.find((c: any) =>
+          String(c?.email || "").toLowerCase().includes(query)
+        );
+        const contactLinkedinMatch = leadContacts.find((c: any) =>
+          String(c?.linkedinProfile || "").toLowerCase().includes(query)
+        );
+
+        const match = findFirstMatch([
+          { matchedOn: "Lead name", matchedValue: lead.company?.name || "" },
+          { matchedOn: "Lead POC name", matchedValue: contactNameMatch?.name || null },
+          { matchedOn: "Lead POC email", matchedValue: contactEmailMatch?.email || null },
+          { matchedOn: "Lead POC LinkedIn", matchedValue: contactLinkedinMatch?.linkedinProfile || null },
+        ]);
+
+        if (!match) return null;
+
+        const stage = String(lead.stage || "universe");
+        const basePath = leadStagePathMap[stage] || "/universe";
+
+        return {
+          entityType: "lead" as const,
+          cardTypeLabel: "LeadCard" as const,
+          id: Number(lead.id),
+          title: String(lead.company?.name || `Lead #${lead.id}`),
+          subtitle: lead.company?.sector || null,
+          matchedOn: match.matchedOn,
+          matchedValue: match.matchedValue,
+          stage,
+          bucket: null,
+          navigatePath: `${basePath}?highlightLead=${lead.id}`,
+        };
+      })
+      .filter(Boolean);
+
+    const visibleInvestors = await this.getInvestorsByStage(organizationId, "all", user);
+
+    const investorResults = (visibleInvestors || [])
+      .map((investor: any) => {
+        const contacts = Array.isArray(investor.contacts) ? investor.contacts : [];
+
+        const contactNameMatch = contacts.find((c: any) =>
+          String(c?.name || "").toLowerCase().includes(query)
+        );
+        const contactEmailMatch = contacts.find((c: any) =>
+          String(c?.email || "").toLowerCase().includes(query)
+        );
+        const contactLinkedinMatch = contacts.find((c: any) =>
+          String(c?.linkedinProfile || "").toLowerCase().includes(query)
+        );
+
+        const match = findFirstMatch([
+          { matchedOn: "Investor name", matchedValue: investor.name || "" },
+          { matchedOn: "Investor POC name", matchedValue: contactNameMatch?.name || null },
+          { matchedOn: "Investor POC email", matchedValue: contactEmailMatch?.email || null },
+          { matchedOn: "Investor POC LinkedIn", matchedValue: contactLinkedinMatch?.linkedinProfile || null },
+        ]);
+
+        if (!match) return null;
+
+        const stage = String(investor.stage || "outreach");
+        const basePath =
+          investorStagePathMap[stage] || "/investor-relation/investor-management/database";
+
+        return {
+          entityType: "investor" as const,
+          cardTypeLabel: "InvestorCard" as const,
+          id: Number(investor.id),
+          title: String(investor.name || `Investor #${investor.id}`),
+          subtitle:
+            [investor.investorType, investor.location].filter(Boolean).join(" • ") || null,
+          matchedOn: match.matchedOn,
+          matchedValue: match.matchedValue,
+          stage,
+          bucket: null,
+          navigatePath: `${basePath}?highlight=${investor.id}`,
+        };
+      })
+      .filter(Boolean);
+
+    const epnAccess = user?.role !== "analyst";
+
+    let epnResults: any[] = [];
+    if (epnAccess) {
+      const epns = await this.getEpnUniverse(organizationId);
+
+      epnResults = (epns || [])
+        .map((epn: any) => {
+          const match = findFirstMatch([
+            { matchedOn: "EPN name", matchedValue: epn.name || "" },
+            { matchedOn: "EPN email", matchedValue: epn.email || null },
+            { matchedOn: "EPN LinkedIn", matchedValue: epn.linkedin || null },
+          ]);
+
+          if (!match) return null;
+
+          const bucket = String(epn.bucket || "other_epn");
+          const stage = String(epn.stage || "outreach");
+
+          return {
+            entityType: "epn" as const,
+            cardTypeLabel: "EpnCard" as const,
+            id: Number(epn.id),
+            title: String(epn.name || `EPN #${epn.id}`),
+            subtitle: epn.designation || null,
+            matchedOn: match.matchedOn,
+            matchedValue: match.matchedValue,
+            stage,
+            bucket,
+            navigatePath: `/epn/${bucket}/${stage}?highlightEpn=${epn.id}`,
+          };
+        })
+        .filter(Boolean);
+    }
+
+    const score = (item: any) => {
+      const title = String(item.title || "").toLowerCase();
+      const matchedValue = String(item.matchedValue || "").toLowerCase();
+
+      if (title === query || matchedValue === query) return 0;
+      if (title.startsWith(query) || matchedValue.startsWith(query)) return 1;
+      return 2;
+    };
+
+    const results = [...leadResults, ...investorResults, ...epnResults]
+      .sort((a: any, b: any) => {
+        const scoreDiff = score(a) - score(b);
+        if (scoreDiff !== 0) return scoreDiff;
+        return String(a.title || "").localeCompare(String(b.title || ""));
+      })
+      .slice(0, 30);
+
+    return {
+      query: rawQuery,
+      results,
+      counts: {
+        leads: leadResults.length,
+        investors: investorResults.length,
+        epns: epnResults.length,
+      },
+      epnAccess,
+    };
   }
 
 
